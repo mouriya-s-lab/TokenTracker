@@ -8,6 +8,10 @@
  * Records longer than maxRecordBytes content bytes (excluding LF) are reported
  * as { line: null, utf8Valid: null, oversized: true } without being buffered
  * beyond the limit or decoded.
+ * With `mustContain` (a byte sequence), LF-terminated records that do not
+ * contain it are reported as { line: null, utf8Valid: null, oversized: false }
+ * without being decoded. A final unterminated record is always decoded: it may
+ * still be mid-write and not yet contain the bytes.
  */
 class PhysicalJsonlLimitError extends Error {
   constructor(maxPhysicalBytes) {
@@ -30,6 +34,7 @@ async function* physicalJsonlRecords(input, {
   invalidUtf8 = "throw",
   maxPhysicalBytes = Infinity,
   maxRecordBytes = Infinity,
+  mustContain = null,
 } = {}) {
   if (invalidUtf8 !== "throw" && invalidUtf8 !== "record") {
     throw new TypeError(`unsupported invalidUtf8 policy: ${invalidUtf8}`);
@@ -80,6 +85,10 @@ async function* physicalJsonlRecords(input, {
       physicalBytesRead += physicalBytes;
       start = newline + 1;
       newline = chunk.indexOf(0x0a, start);
+      if (mustContain && lineBuffer.indexOf(mustContain) === -1) {
+        yield { line: null, utf8Valid: null, oversized: false, physicalBytes, terminated: true };
+        continue;
+      }
       let line;
       try {
         line = decodePhysicalLine(lineBuffer, { stripCr: true });
