@@ -421,6 +421,16 @@ test("HTTP account fan-out shares a healthy read while manual refresh supersedes
 test("usage-summary?account=1 serves the cross-device aggregate when signed in + cloud sync on", async () => {
   const queuePath = path.join(tmpHome, "queue.jsonl");
   writeQueue(queuePath, [SAMPLE_ROW]);
+  // Offline snapshots affect local reads only; a cloud result is authoritative.
+  fs.writeFileSync(path.join(tmpHome, "local-usage.json"), JSON.stringify({
+    version: 1, revision: 1, sequence: 0, imports: {
+      "offline-machine": { imported_at: "2026-04-20T12:00:00.000Z", snapshot: {
+        schema: "tokentracker.local-usage.v1", scope: "device-history",
+        machine: { id: "offline-machine", name: "Laptop", platform: "linux" },
+        sequence: 1, exported_at: "2026-04-20T12:00:00.000Z", rows: [SAMPLE_ROW],
+      } },
+    },
+  }));
 
   const trackerDir = path.join(tmpHome, ".tokentracker", "tracker");
   fs.mkdirSync(trackerDir, { recursive: true });
@@ -459,6 +469,8 @@ test("usage-summary?account=1 serves the cross-device aggregate when signed in +
 
   try {
     const handler = freshHandler(queuePath);
+    const local = await call(handler, { endpoint: "/functions/tokentracker-usage-summary?from=2026-04-20&to=2026-04-20&tz=UTC" });
+    assert.equal(local.json().totals.total_tokens, SAMPLE_ROW.total_tokens * 2);
     const res = await call(handler, {
       endpoint: "/functions/tokentracker-usage-summary?from=2026-04-20&to=2026-04-20&tz=UTC&account=1",
     });
@@ -746,6 +758,81 @@ test("an account read that times out is tagged transient-timeout", async () => {
     const res = await call(handler, { endpoint: HEATMAP_ENDPOINT });
     assert.equal(res._headers["x-tokentracker-account-view"], "0");
     assert.equal(res._headers["x-tokentracker-account-fallback"], "transient-timeout");
+  } finally {
+    global.fetch = realFetch;
+    if (prevTimeout === undefined) delete process.env.TOKENTRACKER_HTTP_TIMEOUT_MS;
+    else process.env.TOKENTRACKER_HTTP_TIMEOUT_MS = prevTimeout;
+  }
+});
+
+test("a slow-but-successful account read finishes in the background and ends the backoff", async () => {
+  const queuePath = path.join(tmpHome, "queue.jsonl");
+  writeQueue(queuePath, [SAMPLE_ROW]);
+  seedSignedInTracker();
+
+  // The payload cache is keyed on the token's `sub`, as real InsForge tokens carry.
+  const accessJwt = `${Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url")}.${Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600, sub: "user-1" }),
+  ).toString("base64url")}.sig`;
+  const prevTimeout = process.env.TOKENTRACKER_HTTP_TIMEOUT_MS;
+  // Callers wait 20 ms; the background probe stays gated until we release it so
+  // the mid-poll assertion is not a timing race on fast CI runners.
+  process.env.TOKENTRACKER_HTTP_TIMEOUT_MS = "20";
+
+  const realFetch = global.fetch;
+  let functionCalls = 0;
+  let releaseProbe;
+  const probeGate = new Promise((resolve) => { releaseProbe = resolve; });
+  let finished;
+  const finishedPromise = new Promise((resolve) => { finished = resolve; });
+  global.fetch = async (urlStr, opts) => {
+    if (String(urlStr).includes("/api/auth/refresh")) {
+      return { ok: true, status: 200, json: async () => ({ accessToken: accessJwt }) };
+    }
+    if (String(urlStr).includes("/tokentracker-account-heatmap")) {
+      functionCalls += 1;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const settleOk = () => {
+          if (settled) return;
+          settled = true;
+          resolve({ ok: true, status: 200, json: async () => ({ weeks: [], cloud: true }) });
+          setImmediate(finished);
+        };
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+          finished(err);
+        };
+        opts?.signal?.addEventListener("abort", onAbort);
+        probeGate.then(() => {
+          if (opts?.signal?.aborted) onAbort();
+          else settleOk();
+        });
+      });
+    }
+    throw new Error(`unexpected fetch ${urlStr}`);
+  };
+  try {
+    const handler = freshHandler(queuePath);
+    const first = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(first._headers["x-tokentracker-account-view"], "0");
+    assert.equal(first._headers["x-tokentracker-account-fallback"], "transient-timeout");
+
+    const during = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(during._headers["x-tokentracker-account-view"], "0");
+
+    releaseProbe();
+    assert.ifError(await finishedPromise);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const after = await call(handler, { endpoint: HEATMAP_ENDPOINT });
+    assert.equal(after._headers["x-tokentracker-account-view"], "1",
+      "the background completion must clear the backoff and fill the payload cache");
+    assert.equal(after.json().cloud, true);
+    assert.equal(functionCalls, 1, "the follow-up read is served from the payload cache");
   } finally {
     global.fetch = realFetch;
     if (prevTimeout === undefined) delete process.env.TOKENTRACKER_HTTP_TIMEOUT_MS;

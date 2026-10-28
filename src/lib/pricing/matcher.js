@@ -122,7 +122,9 @@ function normalizeClaudeModel(model) {
 
 // Cursor decorates model ids with reasoning effort and sometimes places the
 // Claude version before the tier. Normalize those lookup-only aliases while
-// preserving Grok 4.5's distinct Fast SKU (its rate is not the base rate).
+// preserving Cursor Grok Fast SKUs (4.5/4.6/4.7 Fast rates are not the base
+// rates). Gemini 4 Argon effort suffixes (-high/-medium/-low/-minimal) are
+// stripped with the shared decorations set below.
 function normalizeCursorModel(model) {
   if (!model || typeof model !== "string") return model;
   let m = model
@@ -135,6 +137,12 @@ function normalizeCursorModel(model) {
   const parts = m.split("-");
   const isFast = parts.includes("fast");
 
+  if (/^(?:cursor-)?grok-4[.-]7(?:-|$)/.test(m)) {
+    return isFast ? "cursor-grok-4.7-fast" : "cursor-grok-4.7";
+  }
+  if (/^(?:cursor-)?grok-4[.-]6(?:-|$)/.test(m)) {
+    return isFast ? "cursor-grok-4.6-fast" : "cursor-grok-4.6";
+  }
   if (/^(?:cursor-)?grok-4[.-]5(?:-|$)/.test(m)) {
     return isFast ? "cursor-grok-4.5-fast" : "cursor-grok-4.5";
   }
@@ -142,8 +150,8 @@ function normalizeCursorModel(model) {
   // `fast` can be a separately priced SKU (for example composer-2-fast and
   // claude-opus-5-fast). Preserve it for the exact lookups below; when it is
   // merely a decoration, lookupPricing's later suffix-strip still falls back
-  // to the base LiteLLM model.
-  const decorations = new Set(["thinking", "xhigh", "high", "medium", "low"]);
+  // to the base LiteLLM model. Gemini Argon uses "minimal" as an effort level.
+  const decorations = new Set(["thinking", "xhigh", "high", "medium", "low", "minimal"]);
   m = parts.filter((part) => !decorations.has(part)).join("-");
   if (m.startsWith("claude-")) return normalizeClaudeModel(m);
   return m;
@@ -244,6 +252,11 @@ function lookupContainedExactCaseInsensitive(table, model) {
     // is a separate SKU from Opus 5). Dated and provider suffixes still work.
     const suffix = lower.slice(start + key.length);
     if (/^[.\d]/.test(suffix)) continue;
+    // Alternate SKU markers (preview/next/exp/…) must not inherit the base
+    // exact rate, including when they follow a date snapshot
+    // (`qwen3.8-max-2026-09-02-preview`, `qwen3-8-max-0902-preview`).
+    // Plain dated (-0902 / -YYYY-MM-DD) and provider-qualified suffixes still match.
+    if (/(?:^|-)(?:preview|next|exp|experimental|beta|alpha)(?:-|$)/.test(suffix)) continue;
     return table[key];
   }
   return null;
@@ -285,18 +298,25 @@ function lookupPricing(model, { curated, litellm, source } = {}) {
     }
   }
 
-  // 1. CURATED exact
-  // Qwen Flash's provider-qualified and dated IDs share the reference SKU.
-  // Keep the boundary strict: Flash-Next and Max have independent prices.
-  if (/(?:^|\/)qwen3[.-]8-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(lower.trim()) && curated.exact?.["qwen3.8-flash"]) {
-    return { hit: true, source: "curated:exact", value: curated.exact["qwen3.8-flash"] };
-  }
+  // 1. CURATED exact (before family regex aliases so a distinct dated exact
+  // entry cannot be overridden by the shared-SKU regex).
   if (curated.exact && curated.exact[lookupModel]) {
     return { hit: true, source: "curated:exact", value: curated.exact[lookupModel] };
   }
   const curatedDotExact = lookupExactCaseInsensitive(curated.exact, dotForm);
   if (curatedDotExact) {
     return { hit: true, source: "curated:exact-dot", value: curatedDotExact };
+  }
+
+  // Qwen Flash's provider-qualified and dated IDs share the reference SKU.
+  // Keep the boundary strict: Flash-Next and Max have independent prices.
+  if (/(?:^|\/)qwen3[.-]8-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(lower.trim()) && curated.exact?.["qwen3.8-flash"]) {
+    return { hit: true, source: "curated:exact", value: curated.exact["qwen3.8-flash"] };
+  }
+  // Qwen Max (dated -0902 and ISO snapshot -YYYY-MM-DD) share Singapore International SKU.
+  // Keep the boundary strict vs Flash / Flash-Next / -preview (issue #744).
+  if (/(?:^|\/)qwen3[.-]8-max(?:-0902|-\d{4}-\d{2}-\d{2})?$/.test(lower.trim()) && curated.exact?.["qwen3.8-max"]) {
+    return { hit: true, source: "curated:exact", value: curated.exact["qwen3.8-max"] };
   }
 
   // 2. LiteLLM exact
@@ -307,6 +327,32 @@ function lookupPricing(model, { curated, litellm, source } = {}) {
   if (litellmDotExact) {
     return { hit: true, source: "litellm:exact-dot", value: litellmDotExact };
   }
+
+  // Free gateway SKUs carry a `-free` suffix on the paid model id
+  // (`deepseek-v4.1-flash-free`, `minimax-m2.5-free`, Muse `*-contributor-free`).
+  // Runs AFTER curated/LiteLLM exact so an explicit paid exact entry still wins,
+  // and BEFORE alias/fuzzy/base-name matchers so `foo-free` cannot inherit `foo`
+  // list rates. OpenCode Zen established the convention; other sources reuse it
+  // when they emit the same suffix (issue #744).
+  if (lower.endsWith("-free")) {
+    return {
+      hit: true,
+      source: sourceKey === "opencode" ? "curated:opencode-free-suffix" : "curated:free-suffix",
+      value: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+    };
+  }
+
+  // Kimi Code K2.8 Preview aliases must not inherit fuzzy `kimi` → kimi-k2.5 rates (#766).
+  // Parser stores bare `k2.8`; raw `kimicoding` / `kimi-k2.8` / `kimicoding/k2.8` may still
+  // appear in lookups. `kimi-for-coding` keeps its curated exact entry (resolved above).
+  // Stay unpriced until an official per-token public rate exists.
+  if (
+    /(?:^|\/)(?:kimicoding(?:\/k2\.8)?|kimi-k2\.8|k2\.8)(?:-|\.|$)/.test(lower.trim()) ||
+    lower.trim() === "kimicoding"
+  ) {
+    return { hit: false, source: "miss", value: null };
+  }
+
   const curatedDotContainedExact = lookupContainedExactCaseInsensitive(curated.exact, dotForm);
   if (curatedDotContainedExact) {
     return { hit: true, source: "curated:exact-dot", value: curatedDotContainedExact };

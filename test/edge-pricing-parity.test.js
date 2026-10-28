@@ -106,21 +106,56 @@ test("Qwen3.8 Flash local and all cloud paths share full cache pricing (#715)", 
   }
 });
 
+test("Qwen3.8 Max local and all cloud paths share Singapore International rates (#744)", () => {
+  const { getModelPricing: localPricing, computeRowCost } = require("../src/lib/pricing");
+  const expected = { input: 2, output: 6, cache_read: 0.17, cache_write: 2.5 };
+  const variants = ["qwen3.8-max", "QWEN3.8-MAX", "qwen3-8-max", "qwen3.8-max-0902",
+    "qwen3.8-max-2026-09-02", "dashscope/qwen3.8-max", "openrouter/qwen/qwen3.8-max"];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of variants) {
+      const local = localPricing(model);
+      assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, local[key]])), expected, model);
+      assert.deepEqual(JSON.parse(JSON.stringify(edgePricing(model))), expected, `${name}: ${model}`);
+    }
+    const cost = computeRowCost({ model: "qwen3.8-max", input_tokens: 1e6, output_tokens: 1e6,
+      cached_input_tokens: 1e6, cache_creation_input_tokens: 1e6 });
+    assert.ok(Math.abs(cost - 10.67) < 1e-12, "qwen3.8-max cache cost must not be omitted");
+    // Distinct from Flash
+    assert.notDeepEqual(JSON.parse(JSON.stringify(edgePricing("qwen3.8-max"))),
+      JSON.parse(JSON.stringify(edgePricing("qwen3.8-flash"))));
+  }
+});
+
 test("canonical pricing block retains regression-prone entries and matcher order", () => {
   const block = extractBlock(CANONICAL);
 
   // Entries whose absence has already shipped real mispricing.
   for (const key of [
     '"kimi-k2.6"',
+    '"qwen3.8-max"',
+    '"qwen3.8-max-0902"',
+    '"qwen3.8-max-2026-09-02"',
     '"mimo-v2.5-pro"',
     '"mimo-v2.5"',
     '"mimo-v2-flash"',
     '"cursor-grok-4.5"',
     '"cursor-grok-4.5-fast"',
+    '"cursor-grok-4.6"',
+    '"cursor-grok-4.6-fast"',
+    '"cursor-grok-4.7"',
+    '"cursor-grok-4.7-fast"',
+    '"composer-2.5"',
+    '"composer-2.5-fast"',
+    '"gemini-4-argon"',
+    '"kimi-k3.1-pro"',
+    '"kimi-k3.1-pro-highspeed"',
     '"glm-5.3"',
     '"glm-5.3-flash"',
     '"deepseek-v4.1-flash"',
     '"deepseek-flash"',
+    '"claude-haiku-5-5"',
   ]) {
     assert.ok(block.includes(`${key}:`), `canonical table lost ${key}`);
   }
@@ -149,10 +184,26 @@ test("canonical pricing block retains regression-prone entries and matcher order
   order('lower.includes("kimi-k2.6")', 'lower.includes("kimi")');
   order('lower.includes("mimo-v2.5-pro")', 'lower.includes("mimo-v2.5")');
   order(
+    'lower.includes("grok-4.7") && lower.includes("fast")',
+    'lower.includes("grok-4.7"))',
+  );
+  order('lower.includes("grok-4.7"))', 'lower.includes("grok-4.6"))');
+  order(
+    'lower.includes("grok-4.6") && lower.includes("fast")',
+    'lower.includes("grok-4.6"))',
+  );
+  order('lower.includes("grok-4.6"))', 'lower.includes("grok-4.5"))');
+  order(
     'lower.includes("grok-4.5") && lower.includes("fast")',
     'lower.includes("grok-4.5"))',
   );
   order('lower.includes("grok-4.5"))', 'lower.includes("grok-4"))');
+  order('lower.includes("gemini-4-argon")', 'lower.includes("gemini-3"))');
+  order('lower.includes("kimi-k3.1-pro-highspeed")', 'lower.includes("kimi-k3.1-pro")');
+  order('lower.includes("kimi-k3.1-pro")', 'lower.includes("kimi-k3")');
+  order('lower.includes("kimi-k3")', 'lower.includes("kimi")');
+  order('lower.includes("composer-2.5") && lower.includes("fast")', 'lower.includes("composer"))');
+  order('/haiku-5[.-]5(?:$|[^0-9.])/', 'lower.includes("haiku"))');
   // GLM-5.3 Flash is a distinct cheap SKU ($0.15/$0.50 vs the flagship's
   // $1.4/$4.4); its matcher must precede the base glm-5.3 matcher (substring)
   // and glm-5.3 must precede glm-5, or flash rows bill at 6.7x.
@@ -371,6 +422,39 @@ test("all cloud cost paths keep Cline :free models at zero", () => {
   }
 });
 
+test("all cloud cost paths keep OpenCode -free models at zero", () => {
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const getModelPricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(getModelPricing("deepseek-v4.1-flash-free", "opencode"))),
+      { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      name,
+    );
+    assert.ok(getModelPricing("deepseek-v4.1-flash", "opencode").input > 0, name);
+  }
+});
+
+test("Kimi K2.8 Preview aliases stay unpriced locally and in all cloud paths (#766)", () => {
+  const { getModelPricing: localPricing } = require("../src/lib/pricing");
+  const aliases = ["k2.8", "kimicoding", "kimi-k2.8", "kimicoding/k2.8"];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of aliases) {
+      assert.equal(localPricing(model).input, 0, model);
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(edgePricing(model))),
+        { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        `${name}: ${model}`,
+      );
+    }
+    // Sibling priced models still resolve.
+    assert.ok(edgePricing("kimi-k2.5").input > 0, name);
+    assert.ok(edgePricing("kimi-for-coding").input > 0, name);
+  }
+});
+
 test("WorkBuddy AI auto routing stays unpriced across local and cloud paths", () => {
   const { getModelPricing: localPricing } = require("../src/lib/pricing");
   for (const name of [CANONICAL, ...MIRRORS]) {
@@ -417,4 +501,37 @@ test("all cloud cost paths retain DeepSeek V4 peak/off-peak pricing tiers", () =
     /ma\.totalCostUsd \+= subscriptionBacked/,
     "model breakdown must price each pricing-tier row before collapsing models",
   );
+});
+
+test("Kimi K3.1 Pro / Highspeed priced distinctly from kimi-k3 locally and in all cloud paths", () => {
+  const { getModelPricing: localPricing } = require("../src/lib/pricing");
+  const cases = [
+    ["kimi-k3.1-pro", { input: 2, output: 10, cache_read: 0.2, cache_write: 2 }],
+    ["k3.1pro", { input: 2, output: 10, cache_read: 0.2, cache_write: 2 }],
+    ["kimi-k3.1-pro-highspeed", { input: 4, output: 20, cache_read: 0.2, cache_write: 4 }],
+    ["moonshot/kimi-k3.1-pro-highspeed", { input: 4, output: 20, cache_read: 0.2, cache_write: 4 }],
+  ];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const [model, rates] of cases) {
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(edgePricing(model))),
+        rates,
+        `${name}: ${model}`,
+      );
+      assert.equal(localPricing(model).input, rates.input, `local ${model}`);
+      assert.equal(localPricing(model).output, rates.output, `local ${model}`);
+    }
+    assert.notDeepEqual(
+      JSON.parse(JSON.stringify(edgePricing("kimi-k3.1-pro"))),
+      JSON.parse(JSON.stringify(edgePricing("kimi-k3"))),
+      `${name}: k3.1-pro must not inherit kimi-k3`,
+    );
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(edgePricing("gemini-4-argon"))),
+      { input: 2, output: 10, cache_read: 0.1, cache_write: 0 },
+      `${name}: gemini-4-argon`,
+    );
+  }
 });

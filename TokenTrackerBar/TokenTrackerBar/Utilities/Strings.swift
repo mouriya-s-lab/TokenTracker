@@ -67,6 +67,21 @@ enum Strings {
     static var cursorAutoLabel: String { t("Auto", "自动", "自動", "自動", "자동") }
     static var cursorGrokBotLabel: String { t("Grok Bot", "Grok 机器人", "Grok 機器人", "Grokボット", "Grok 봇") }
     static var codexCreditsLabel: String { t("Credits", "额度", "額度", "クレジット", "크레딧") }
+
+    static func limitCreditsDetail(used: Double, total: Double, remaining: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: loc)
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        func amount(_ value: Double) -> String { formatter.string(from: NSNumber(value: value)) ?? String(value) }
+        let used = amount(used), total = amount(total), remaining = amount(remaining)
+        return t("\(used) / \(total) credits used · \(remaining) left",
+                 "已用 \(used) / \(total) 点额度 · 剩余 \(remaining)",
+                 "已用 \(used) / \(total) 點額度 · 剩餘 \(remaining)",
+                 "\(used) / \(total) クレジット使用 · 残り \(remaining)",
+                 "\(used) / \(total) 크레딧 사용 · \(remaining) 남음")
+    }
     static var kimiWeeklyLabel: String { t("Weekly", "周", "周", "週間", "주간") }
     static var kimiFiveHourLabel: String { t("5h", "5h", "5h", "5h", "5h") }
     static var kimiTotalLabel: String { t("Total", "总量", "總量", "合計", "총량") }
@@ -76,6 +91,7 @@ enum Strings {
     // (UsageLimitsView) and the reset notification detector so both surfaces
     // render the same label.
     static var qoderPlanLabel: String { t("Plan", "套餐", "套餐", "プラン", "플랜") }
+    static var workbuddyPlanLabel: String { t("Plan", "套餐", "套餐", "プラン", "플랜") }
     static var qoderBonusLabel: String { t("Bonus", "奖励", "獎勵", "ボーナス", "보너스") }
     static var grokMonthLabel: String { t("Month", "月度", "月度", "月間", "월간") }
     static var grokWeekLabel: String { t("Weekly", "周", "週", "週間", "주간") }
@@ -90,12 +106,61 @@ enum Strings {
         default: return grokMonthLabel
         }
     }
+
+    /// Product-share row. Known billing ids use the same names as the dashboard;
+    /// anything else falls back to the server label.
+    static func grokProductLabel(product: String, fallback: String?) -> String {
+        switch product {
+        case "GrokBuild": return t("Grok Build", "Grok Build", "Grok Build", "Grok Build", "Grok Build")
+        case "GrokBot": return cursorGrokBotLabel
+        case "GrokChat": return t("Chat", "聊天", "聊天", "チャット", "채팅")
+        case "GrokImagine": return t("Imagine", "Imagine", "Imagine", "Imagine", "Imagine")
+        case "GrokVoice": return t("Voice", "语音", "語音", "ボイス", "음성")
+        case "Cursor": return t("Cursor", "Cursor", "Cursor", "Cursor", "Cursor")
+        default:
+            let trimmed = fallback?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? product : trimmed
+        }
+    }
+
+    /// Shown under the product legend in Remaining mode. The shares are points
+    /// of the amount used, so they do not add up to the remaining headline.
+    static var grokSharesAreUsed: String {
+        t(
+            "Product shares are portions of the amount used.",
+            "各产品百分比是已用部分的份额。",
+            "各產品百分比是已用部分的份額。",
+            "各製品の割合は、使用した分の内訳です。",
+            "제품별 비율은 사용한 양의 몫입니다."
+        )
+    }
     static var limitResetNow: String { t("now", "现在", "現在", "今", "지금") }
     static func kimiParallelLabel(_ count: Int) -> String {
         t("Parallel: \(count)", "并发：\(count)", "併發：\(count)", "並列：\(count)", "병렬: \(count)")
     }
     static var codexResetBankSectionTitle: String {
         t("Resets", "重置权益", "重置權益", "リセット", "리셋")
+    }
+    static var zcodeResetBankSectionTitle: String {
+        t("Quota resets", "额度重置", "額度重設", "使用枠のリセット", "한도 초기화")
+    }
+    static func zcodeResetBankCount(_ count: Int) -> String {
+        t("\(count) available", "\(count) 次可用", "\(count) 次可用", "\(count) 回利用可能", "\(count)회 사용 가능")
+    }
+    static func zcodeResetBankEarliest(_ time: String) -> String {
+        t("Earliest expiry: \(time)", "最早 \(time) 到期", "最早 \(time) 到期", "最も早い有効期限: \(time)", "가장 빠른 만료: \(time)")
+    }
+    static var zcodeStartGrantsTitle: String {
+        t("Start Plan", "Start 套餐", "Start 方案", "Start プラン", "Start 플랜")
+    }
+    static func zcodeGrantAmount(remaining: String, total: String) -> String {
+        t(
+            "\(remaining) / \(total) tokens remaining",
+            "剩余 \(remaining) / \(total) Token",
+            "剩餘 \(remaining) / \(total) Token",
+            "残り \(remaining) / \(total) トークン",
+            "남은 토큰 \(remaining) / \(total)"
+        )
     }
     static func codexResetBankLabel(_ index: Int) -> String {
         t("Reset \(index)", "重置 \(index)", "重置 \(index)", "リセット \(index)", "리셋 \(index)")

@@ -35,6 +35,7 @@ const { fetchDevinLimits } = require("./devin-limits");
 const { fetchQoderLimits, fetchQoderCnLimits } = require("./qoder-limits");
 const { fetchArkCodingPlanLimits } = require("./ark-coding-plan-limits");
 const { fetchArkAgentPlanLimits } = require("./ark-agent-plan-limits");
+const { fetchWorkbuddyLimits, fetchWorkbuddyAiLimits, selectWorkbuddyLimits } = require("./workbuddy-limits");
 const { fetchProviderServiceStatus } = require("./provider-status");
 const { resolveKimiProfile } = require("./kimi-profile");
 const { readSqliteJsonRows, readSqliteJsonRowsAsync } = require("./sqlite-reader");
@@ -56,6 +57,10 @@ const execFileAsync = promisify(cp.execFile);
 const USAGE_LIMITS_SELECTION_KEYS = ["off-on", "off-off", "on-on", "on-off"];
 const cacheBySelection = {};
 for (const key of USAGE_LIMITS_SELECTION_KEYS) cacheBySelection[key] = { data: null, expiresAtMs: 0 };
+// Credential replacements (provider-key save) bump this generation so a fetch
+// that started under the old credential cannot repopulate the memory or disk
+// caches after invalidation.
+let usageLimitsCacheGeneration = 0;
 function usageLimitsSelectionKey(options) {
   const devin = options?.devinEnabled === true ? "on" : "off";
   const antigravity = isAntigravityQuotaDisabled() ? "off" : "on";
@@ -742,6 +747,32 @@ function normalizeCursorUsageSummary(body) {
     secondary_window: buildWindow({ usedPercent: autoPercent, resetAt: billingCycleEnd, windowSeconds: billingCycleSeconds }),
     tertiary_window: buildWindow({ usedPercent: apiPercent, resetAt: billingCycleEnd, windowSeconds: billingCycleSeconds }),
   };
+}
+
+/**
+ * Cursor's Sand RPC reports Grok Bot usage. grok.com shows that as a weekly
+ * Grok Bot limit of its own, separate from the SuperGrok pool and with its own
+ * reset, so the Sand bar normally stays. It is hidden only when it is
+ * indistinguishable from the Grok pool, so the same numbers are not drawn
+ * twice: Grok billing lists a GrokBot product share, and the two windows reset
+ * at the same instant and sit within a point of each other.
+ */
+function cursorSandDuplicatesGrokPool(cursor, grok) {
+  const sand = cursor?.quaternary_window;
+  const pool = grok?.primary_window;
+  if (!sand || !pool || cursor?.error || grok?.error) return false;
+  const products = Array.isArray(grok.products) ? grok.products : [];
+  if (!products.some((entry) => entry?.product === "GrokBot" && entry.window)) return false;
+  const sandReset = Date.parse(sand.reset_at || "");
+  const poolReset = Date.parse(pool.reset_at || "");
+  // Same instant. Two seconds covers one side dropping milliseconds.
+  // A different billing window is days apart, so it still stays visible.
+  if (!Number.isFinite(sandReset) || !Number.isFinite(poolReset)) return false;
+  if (Math.abs(sandReset - poolReset) > 2000) return false;
+  const sandPct = Number(sand.used_percent);
+  const poolPct = Number(pool.used_percent);
+  if (!Number.isFinite(sandPct) || !Number.isFinite(poolPct)) return false;
+  return Math.abs(sandPct - poolPct) <= 1;
 }
 
 function normalizeCursorSandUsageStatus(body, { eligible = true } = {}) {
@@ -2576,8 +2607,12 @@ function writeCodexLimitsCache(limits, { home, nowMs = Date.now() } = {}) {
   } catch (_error) {}
 }
 
-function resolveOpencodeGoLimitsCachePath({ home } = {}) {
-  return path.join(home || os.homedir(), ".tokentracker", "tracker", OPENCODE_GO_LIMITS_CACHE_FILE);
+function resolveOpencodeGoLimitsCachePath({ trackerDir, home } = {}) {
+  const dir =
+    typeof trackerDir === "string" && trackerDir.trim()
+      ? trackerDir.trim()
+      : path.join(home || os.homedir(), ".tokentracker", "tracker");
+  return path.join(dir, OPENCODE_GO_LIMITS_CACHE_FILE);
 }
 
 function hasOpencodeGoWindow(limits) {
@@ -2605,10 +2640,15 @@ function normalizeOpencodeGoCachedLimits(
   if (cachedAtMs > nowMs + 60_000) return null;
   if (nowMs - cachedAtMs > effectiveMaxAge) return null;
 
+  const credentialSource =
+    raw?.credential_source === "env" || raw?.credential_source === "stored"
+      ? raw.credential_source
+      : null;
   const cached = {
     configured: true,
     error: null,
     source: typeof raw?.source === "string" ? raw.source : "api",
+    credential_source: credentialSource,
     subscription_status: typeof raw?.subscription_status === "string" ? raw.subscription_status : null,
     plan_label: typeof raw?.plan_label === "string" ? raw.plan_label : null,
     primary_window: isOpencodeGoCacheWindowUsable(raw?.primary_window, { nowMs }) ? raw.primary_window : null,
@@ -2620,8 +2660,8 @@ function normalizeOpencodeGoCachedLimits(
   return hasOpencodeGoWindow(cached) ? cached : null;
 }
 
-function readOpencodeGoLimitsCache({ home, nowMs = Date.now() } = {}) {
-  const cachePath = resolveOpencodeGoLimitsCachePath({ home });
+function readOpencodeGoLimitsCache({ trackerDir, home, nowMs = Date.now() } = {}) {
+  const cachePath = resolveOpencodeGoLimitsCachePath({ trackerDir, home });
   try {
     const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8"));
     return normalizeOpencodeGoCachedLimits(parsed?.opencodeGo, { nowMs });
@@ -2630,12 +2670,17 @@ function readOpencodeGoLimitsCache({ home, nowMs = Date.now() } = {}) {
   }
 }
 
-function writeOpencodeGoLimitsCache(limits, { home, nowMs = Date.now() } = {}) {
+function writeOpencodeGoLimitsCache(limits, { trackerDir, home, nowMs = Date.now() } = {}) {
   if (!limits?.configured || limits.error || !hasOpencodeGoWindow(limits)) return;
-  const cachePath = resolveOpencodeGoLimitsCachePath({ home });
+  const cachePath = resolveOpencodeGoLimitsCachePath({ trackerDir, home });
+  const credentialSource =
+    limits.credential_source === "env" || limits.credential_source === "stored"
+      ? limits.credential_source
+      : null;
   const payload = {
     opencodeGo: {
       source: limits.source || "api",
+      credential_source: credentialSource,
       subscription_status: limits.subscription_status || null,
       plan_label: limits.plan_label || null,
       primary_window: limits.primary_window || null,
@@ -3962,7 +4007,12 @@ async function getUsageLimits(options = {}) {
   if (inFlightBySelection[selection]) {
     return inFlightBySelection[selection];
   }
-  const promise = fetchUsageLimitsUncached({ ...options, selectionKey: selection }).finally(() => {
+  const cacheGeneration = usageLimitsCacheGeneration;
+  const promise = fetchUsageLimitsUncached({
+    ...options,
+    selectionKey: selection,
+    cacheGeneration,
+  }).finally(() => {
     if (inFlightBySelection[selection] === promise) inFlightBySelection[selection] = null;
   });
   inFlightBySelection[selection] = promise;
@@ -3975,6 +4025,7 @@ async function getUsageLimits(options = {}) {
  */
 async function fetchUsageLimitsUncached({
   home,
+  trackerDir,
   env,
   platform,
   securityRunner,
@@ -3986,6 +4037,10 @@ async function fetchUsageLimitsUncached({
   providerTimeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS,
   forceRefresh = false,
   devinEnabled = false,
+  // Generation captured by getUsageLimits before the fetch began. A provider
+  // key save bumps it, and this fetch must then stop at returning its own
+  // result: publishing it would restore pre-save data for every later caller.
+  cacheGeneration = usageLimitsCacheGeneration,
   // Selection key fixed by getUsageLimits before the fetch began. Re-deriving it
   // here would let an opt-out flipped mid-fetch store a pre-opt-out result in the
   // post-opt-out slot.
@@ -4052,7 +4107,7 @@ async function fetchUsageLimitsUncached({
     : null;
 
   const providerFetch = withFetchTimeout(fetchImpl, providerTimeoutMs);
-  const [claudeResult, codexResult, cursor, kimi, gemini, kiro, antigravity, copilot, grok, zcode, opencodeGoRaw, qoder, qoderCn, codingPlan, agentPlan, commandCodeRaw, devinRaw, claudeServiceStatus] = await Promise.all([
+  const [claudeResult, codexResult, cursor, kimi, gemini, kiro, antigravity, copilot, grok, zcode, opencodeGoRaw, qoder, qoderCn, codingPlan, agentPlan, commandCodeRaw, devinRaw, workbuddy, workbuddyAi, claudeServiceStatus] = await Promise.all([
     claudeToken && !freshClaudeCache && !claudeRetryAtMs
       ? withProviderTimeout(fetchClaudeUsageLimits(claudeToken, { fetchImpl: providerFetch, maxAttempts: 1 }), "Claude", providerTimeoutMs).then(
           (value) => ({ status: "fulfilled", value }),
@@ -4104,7 +4159,7 @@ async function fetchUsageLimitsUncached({
     // OpenCode Go: authoritative subscription windows come from the dashboard
     // scrape; local opencode.db cost is available only as an explicit estimate.
     // See src/lib/opencode-go-limits.js.
-    withProviderTimeout(fetchOpencodeGoLimits({ home, env, fetchImpl: providerFetch }), "OpenCode Go", providerTimeoutMs)
+    withProviderTimeout(fetchOpencodeGoLimits({ home, trackerDir, env, fetchImpl: providerFetch }), "OpenCode Go", providerTimeoutMs)
       .catch((reason) => ({ configured: true, error: reason?.message || "Unknown error" })),
     withProviderTimeout(
       fetchQoderLimits({
@@ -4162,7 +4217,7 @@ async function fetchUsageLimitsUncached({
     // outer race bounds the whole slot: without it three sequential per-request
     // timeouts (whoami, then credits+subscriptions) could hold the aggregate
     // ~2x longer than any sibling provider.
-    withProviderTimeout(fetchCommandcodeLimits({ home, env, fetchImpl: providerFetch }), "CommandCode", providerTimeoutMs)
+    withProviderTimeout(fetchCommandcodeLimits({ home, trackerDir, env, fetchImpl: providerFetch }), "CommandCode", providerTimeoutMs)
       .then(
         (value) => ({ status: "fulfilled", value }),
         (reason) => ({ status: "rejected", reason }),
@@ -4177,6 +4232,13 @@ async function fetchUsageLimitsUncached({
         (value) => ({ status: "fulfilled", value }),
         (reason) => ({ status: "rejected", reason }),
       ),
+    // WorkBuddy CN and WorkBuddy AI are separate editions. Each one calls only
+    // its own local authenticated billing proxy. Abort closes the IPC socket
+    // when the provider budget expires. Reward credits are not a plan window.
+    withAbortableProviderTimeout((signal) => fetchWorkbuddyLimits({ home, env, fetchImpl: providerFetch, signal }), "WorkBuddy", providerTimeoutMs)
+      .catch((reason) => ({ configured: true, error: reason?.message || "Unknown error" })),
+    withAbortableProviderTimeout((signal) => fetchWorkbuddyAiLimits({ home, env, fetchImpl: providerFetch, signal }), "WorkBuddy AI", providerTimeoutMs)
+      .catch((reason) => ({ configured: true, error: reason?.message || "Unknown error" })),
     // Public status-page probe (fail-soft, own 5-min cache in provider-status.js).
     // Only probed for configured accounts — without a token the Claude section
     // never renders, so the reading would have nowhere to go.
@@ -4355,9 +4417,11 @@ async function fetchUsageLimitsUncached({
       stale: false,
       cached_at: new Date(nowMs).toISOString(),
     };
-    writeOpencodeGoLimitsCache(opencodeGo, { home, nowMs });
+    if (cacheGeneration === usageLimitsCacheGeneration) {
+      writeOpencodeGoLimitsCache(opencodeGo, { trackerDir, home, nowMs });
+    }
   } else {
-    const cached = readOpencodeGoLimitsCache({ home, nowMs });
+    const cached = readOpencodeGoLimitsCache({ trackerDir, home, nowMs });
     if (cached) {
       opencodeGo = cached;
     } else {
@@ -4403,11 +4467,15 @@ async function fetchUsageLimitsUncached({
       : { configured: true, error: reason?.message || "Unknown error" };
   }
 
+  const cursorLimits = cursorSandDuplicatesGrokPool(cursor, grok)
+    ? { ...cursor, quaternary_window: null }
+    : cursor;
+
   const data = {
     fetched_at: new Date(nowMs).toISOString(),
     claude: withPlanLabel(claude, claudePlanType, "Claude"),
     codex: withPlanLabel(codex, codex.plan_type, "Codex"),
-    cursor: withPlanLabel(cursor, cursor.membership_type, "Cursor"),
+    cursor: withPlanLabel(cursorLimits, cursorLimits.membership_type, "Cursor"),
     // Kimi's subType (TYPE_PURCHASE/TYPE_EVENT) is the credit *source*, not a plan
     // tier, and membership.level is an opaque enum (LEVEL_INTERMEDIATE) with no
     // authoritative human-readable plan mapping. Both rendered as garbage like
@@ -4437,6 +4505,9 @@ async function fetchUsageLimitsUncached({
     qoderCn: withPlanLabel(qoderCn, qoderCn?.plan_label, "Qoder CN"),
     codingPlan: withPlanLabel(codingPlan, codingPlan?.plan_label, "Ark Coding Plan"),
     agentPlan: withPlanLabel(agentPlan, agentPlan?.plan_label, "Ark Agent Plan"),
+    // WorkBuddy preserves provider English names and official edition labels
+    // verbatim (including Free, STANDARD and Pro-Trial).
+    workbuddy: selectWorkbuddyLimits(workbuddy, workbuddyAi),
   };
 
   for (const [providerName, provider] of Object.entries(data)) {
@@ -4460,16 +4531,22 @@ async function fetchUsageLimitsUncached({
     };
   }
 
-  cacheBySelection[selectionKey || usageLimitsSelectionKey({ devinEnabled })] = {
-    data,
-    expiresAtMs: cacheExpiresAtMs(data, nowMs),
-  };
+  if (cacheGeneration === usageLimitsCacheGeneration) {
+    cacheBySelection[selectionKey || usageLimitsSelectionKey({ devinEnabled })] = {
+      data,
+      expiresAtMs: cacheExpiresAtMs(data, nowMs),
+    };
+  }
   return data;
 }
 
-function resetUsageLimitsCache() {
+function resetUsageLimitsCache({ invalidateInFlight = false } = {}) {
+  if (invalidateInFlight) usageLimitsCacheGeneration += 1;
   for (const key of USAGE_LIMITS_SELECTION_KEYS) {
     cacheBySelection[key] = { data: null, expiresAtMs: 0 };
+    // Ordinary resets still let a running fetch serve refresh=1 callers; a
+    // credential replacement must not, so drop the old-key promises too.
+    if (invalidateInFlight) inFlightBySelection[key] = null;
   }
 }
 
@@ -4477,6 +4554,8 @@ module.exports = {
   getUsageLimits,
   normalizePlanLabel,
   resetUsageLimitsCache,
+  OPENCODE_GO_LIMITS_CACHE_FILE,
+  resolveOpencodeGoLimitsCachePath,
   cacheExpiresAtMs,
   runCommand,
   extractGeminiOauthClientCredentials,
@@ -4484,6 +4563,7 @@ module.exports = {
   fetchKimiLimits,
   normalizeCursorUsageSummary,
   normalizeCursorSandUsageStatus,
+  cursorSandDuplicatesGrokPool,
   normalizeGeminiQuotaResponse,
   normalizeKimiUsageResponse,
   parseKiroUsageOutput,
@@ -4517,4 +4597,6 @@ module.exports = {
   fetchCommandcodeLimits,
   fetchQoderLimits,
   fetchQoderCnLimits,
+  fetchWorkbuddyLimits,
+  fetchWorkbuddyAiLimits,
 };

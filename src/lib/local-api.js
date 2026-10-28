@@ -13,11 +13,13 @@ const {
   normalizeUsageScope,
 } = require("./source-metadata");
 const { accountSlugFor, fetchAccountUsage, mintAccessToken, invalidateCloudAccountPayloadCache, getCloudAccountSessionGeneration } = require("./cloud-account");
+const { resetCloudDeviceUsage, readCloudUsageReset } = require("./cloud-usage-reset");
 const { getOrCreateMachineId, computeStableMachineId } = require("./machine-id");
 const { functionUrlFor, fetchFunctionResponse } = require("./function-url");
 const { createCloudDeviceTokenStore } = require("./cloud-device-token");
 const { parseBearerToken } = require("./bearer-token");
 const { writeJsonAtomicSync } = require("./atomic-json");
+const { createLocalUsageTransfer, MAX_BYTES: LOCAL_USAGE_MAX_BYTES } = require("./local-usage-transfer");
 
 const SYNC_TIMEOUT_MS = 120_000;
 // A failed account-view request should not stall every dashboard refresh
@@ -25,6 +27,10 @@ const SYNC_TIMEOUT_MS = 120_000;
 // request still falls back normally; subsequent fan-out requests reuse that
 // decision for a short cooldown and return local data immediately.
 const ACCOUNT_VIEW_FAILURE_BACKOFF_MS = 2 * 60_000;
+// A caller stops waiting for the cloud after the response timeout, but the
+// read keeps going in the background for this many times as long so a slow
+// edge can still fill the payload cache and end the backoff early.
+const ACCOUNT_VIEW_BACKGROUND_TIMEOUT_FACTOR = 5;
 const TRACKER_BIN = path.resolve(__dirname, "../../bin/tracker.js");
 const MAX_DEVICE_NAME_LENGTH = 128;
 
@@ -398,17 +404,6 @@ function buildCodexCategoryFallbackFromQueue(queueRows, { from, to, timeZoneCont
 function getRequestedUsageScope(url) {
   if (url.searchParams.get("include_account_level") === "1") return "all";
   return normalizeUsageScope(url.searchParams.get("scope"));
-}
-
-async function scopedQueueRows(queuePath, url) {
-  const scope = getRequestedUsageScope(url);
-  const allRows = await readQueueData(queuePath);
-  return {
-    scope,
-    allRows,
-    rows: filterRowsByUsageScope(allRows, scope),
-    excludedSources: listExcludedSources(allRows, scope),
-  };
 }
 
 // ── Local achievements ───────────────────────────────────────────────────────
@@ -1006,6 +1001,17 @@ function buildProxyHeaders(headers) {
 
 function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir: isolatedTrackerDataDir = null, syncContext = null }) {
   const qp = queuePath || resolveQueuePath();
+  const localUsage = createLocalUsageTransfer({ queuePath: qp, normalizeRow: normalizeQueueRow,
+    identity: () => ({ id: getOrCreateMachineId(qp), name: getSystemDeviceName(), platform: process.platform }) });
+  async function scopedQueueRows(queuePath, url) {
+    const scope = getRequestedUsageScope(url);
+    const ownRows = await readQueueData(queuePath);
+    const selected = url.searchParams.get("device_id") || "";
+    // Only offline IDs select a snapshot; other IDs retain the local fallback.
+    const device = selected.startsWith("local:") ? selected : "";
+    const allRows = url.pathname.startsWith("/functions/tokentracker-usage-") ? await localUsage.view(ownRows, device) : ownRows;
+    return { scope, allRows, rows: filterRowsByUsageScope(allRows, scope), excludedSources: listExcludedSources(allRows, scope) };
+  }
   const normalizedServerVersion = typeof serverVersion === "string" ? serverVersion.trim() : "";
 
   // Server-side cookie relay: captures auth cookies from InsForge cloud responses
@@ -1493,6 +1499,7 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
   // otherwise a fallback reason (see above) telling the caller — and, through
   // the `X-TokenTracker-Account-Fallback` header, the popover — why the local
   // single-machine data is being served instead.
+  const ACCOUNT_VIEW_STILL_PENDING = Symbol("account-view-still-pending");
   async function tryServeAccountView(usageSlug, url, res) {
     if (!getCloudSyncPref()) return ACCOUNT_FALLBACK_CLOUD_SYNC_OFF;
     const refreshToken = getRefreshTokenForCloud();
@@ -1512,7 +1519,15 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
     const envTimeout = process.env.TOKENTRACKER_HTTP_TIMEOUT_MS
       ? parseInt(process.env.TOKENTRACKER_HTTP_TIMEOUT_MS, 10)
       : 0;
-    const timeoutMs = envTimeout > 0 ? envTimeout : 4000;
+    // `responseTimeoutMs` bounds how long THIS caller waits before it gets the
+    // local fallback. The cloud read itself keeps running in the background
+    // for up to ACCOUNT_VIEW_BACKGROUND_TIMEOUT_FACTOR times that: full-history
+    // aggregates from far regions often take 2-6 s, and the first read after a
+    // backoff window meets an edge that went cold during it. A late success
+    // still fills the payload cache and clears the backoff, so the next poll is
+    // served instead of timing out again.
+    const responseTimeoutMs = envTimeout > 0 ? envTimeout : 4000;
+    const requestTimeoutMs = responseTimeoutMs * ACCOUNT_VIEW_BACKGROUND_TIMEOUT_FACTOR;
     try {
       // An identical overlapping read shares the entire probe, including its
       // token mint. A healthy pending read must not look like a cloud outage
@@ -1525,7 +1540,7 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
           baseUrl: runtime.baseUrl || DEFAULT_BASE_URL,
           anonKey: runtime.anonKey,
           refreshToken,
-          timeoutMs,
+          timeoutMs: requestTimeoutMs,
           onSessionRefreshed: (session) => {
             getRuntime();
             if (sessionAtStart !== getCloudAccountSessionGeneration()) {
@@ -1540,8 +1555,32 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
           if (accountViewInFlight.get(requestKey) === pending) accountViewInFlight.delete(requestKey);
         };
         pending.then(cleanup, cleanup);
+        // Settle the backoff from the probe itself, so it also counts when
+        // every caller has already stopped waiting.
+        pending.then(
+          (out) => { if (out && out.data != null) accountViewFailures.delete(failureKey); },
+          (e) => { if (e?.code !== "auth_session_changed") rememberAccountViewFailure(failureKey); },
+        );
       }
-      const out = await pending;
+      let responseTimer;
+      const responseDeadline = new Promise((resolve) => {
+        responseTimer = setTimeout(() => resolve(ACCOUNT_VIEW_STILL_PENDING), responseTimeoutMs);
+        if (typeof responseTimer.unref === "function") responseTimer.unref();
+      });
+      let out;
+      try {
+        out = await Promise.race([pending, responseDeadline]);
+      } finally {
+        clearTimeout(responseTimer);
+      }
+      if (out === ACCOUNT_VIEW_STILL_PENDING) {
+        // Back the fan-out off as before; the probe clears this on success.
+        rememberAccountViewFailure(failureKey);
+        if (getRuntime().debug) {
+          console.warn(`[LocalAPI] account view still pending after ${responseTimeoutMs}ms for ${usageSlug}; continuing in background`);
+        }
+        return "transient-timeout";
+      }
       getRuntime();
       // `null` here means the slug has no cloud equivalent, or the session
       // vanished mid-request — a routing/session fact, not an outage.
@@ -1638,6 +1677,32 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
 
   return async function handleLocalApi(req, res, url) {
     const p = url.pathname;
+    if (p === "/api/local-usage") {
+      if (!isAuthorizedLocalMutation(req)) { json(res, { code: "unauthorized" }, 401); return true; }
+      try {
+        if (req.method === "GET") {
+          const from = url.searchParams.get("from") || "";
+          const to = url.searchParams.get("to") || "";
+          const context = getTimeZoneContext(url);
+          const inRange = (row) => { const day = rowDayKey(row, context); return day && (!from || day >= from) && (!to || day <= to); };
+          json(res, await localUsage.devices(await readQueueData(qp), inRange));
+        } else if (req.method === "POST") {
+          const body = JSON.parse((await readBodyLimited(req, LOCAL_USAGE_MAX_BYTES + 4096)).toString("utf8"));
+          if (body.action === "export") json(res, { snapshot: await localUsage.exportSnapshot() });
+          else if (body.action === "preview") json(res, await localUsage.preview(body.snapshot));
+          else if (body.action === "import") json(res, await localUsage.importSnapshot(body.snapshot, body.token));
+          else if (body.action === "remove") { await localUsage.remove(body.machine_id); json(res, { ok: true }); }
+          else json(res, { code: "invalid_snapshot" }, 400);
+        } else json(res, { code: "method_not_allowed" }, 405);
+      } catch (error) {
+        json(res, { code: error.code && error.status ? error.code : "transfer_failed" }, error.status || 400);
+      }
+      return true;
+    }
+    if (p.startsWith("/functions/tokentracker-usage-") && url.searchParams.get("device_id")?.startsWith("local:")) {
+      try { await localUsage.view([], url.searchParams.get("device_id")); }
+      catch (error) { json(res, { code: error.code || "transfer_failed" }, error.status || 500); return true; }
+    }
     // Session recovery and the one-time native callback marker belong to local
     // clients. Reject foreign requests before consuming either, including preflights.
     const nativeMarkerRead = p === "/api/auth-bridge/verifier" && String(req.method).toUpperCase() === "GET";
@@ -2162,6 +2227,39 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
       return true;
     }
 
+    if (p === "/functions/tokentracker-cloud-usage-reset") {
+      if (!isAuthorizedLocalMutation(req) || req.headers["sec-fetch-site"] === "cross-site") { json(res, { error: "Unauthorized" }, 401); return true; }
+      try {
+        if (String(req.method).toUpperCase() === "GET") {
+          json(res, { pending: Boolean(readCloudUsageReset(trackerDataDir)) }); return true;
+        }
+        if (String(req.method).toUpperCase() !== "POST") { json(res, { error: "Method Not Allowed" }, 405); return true; }
+        const body = await readJsonBody(req);
+        const session = localCloudSession;
+        if (!getCloudSyncPref() || !session || body.cloudSessionId !== session.id || body.expectedOwnerId !== session.ownerId) {
+          json(res, { code: "auth_session_changed" }, 409); return true;
+        }
+        const metadata = localSyncDeviceMetadata.get(session.token);
+        const accessToken = String(req.headers.authorization || "").replace(/^Bearer /i, "").trim();
+        const runtime = assertInsforgeRuntime(getRuntime());
+        let claims;
+        try { claims = JSON.parse(Buffer.from(accessToken.split(".")[1], "base64url").toString("utf8")); } catch { /* rejected below */ }
+        if (claims?.sub !== session.ownerId || !Number.isFinite(claims?.exp) || claims.exp * 1000 <= Date.now()) {
+          json(res, { code: "auth_required" }, 401); return true;
+        }
+        const isCurrent = () => getCloudSyncPref() && localCloudSession === session && session.generation === localCloudGeneration &&
+          claims.exp * 1000 > Date.now() && getRuntime().baseUrl === session.baseUrl;
+        const result = await resetCloudDeviceUsage({ trackerDir: trackerDataDir, ownerId: session.ownerId,
+          deviceId: metadata?.deviceId, baseUrl: session.baseUrl, anonKey: runtime.anonKey, accessToken, isCurrent });
+        if (!isCurrent()) { json(res, { code: "auth_session_changed" }, 409); return true; }
+        clearLocalSyncDeviceTokenCache();
+        invalidateAfterAccountUpload();
+        invalidateCloudAccountPayloadCache();
+        json(res, { ...result, pending: true });
+      } catch (error) { json(res, { error: error.code || "cloud_usage_reset_failed", code: error.code || null }, error.status || 502); }
+      return true;
+    }
+
     // --- local-sync (POST) ---
     if (p === "/functions/tokentracker-local-sync") {
       if (String(req.method || "GET").toUpperCase() !== "POST") {
@@ -2263,10 +2361,20 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
         if (extraEnv.TOKENTRACKER_DEVICE_TOKEN && uploadGeneration !== localCloudGeneration) {
           json(res, { ok: false, code: "auth_session_changed" }, 409); return true;
         }
+        if (extraEnv.TOKENTRACKER_DEVICE_TOKEN) {
+          const metadata = localSyncDeviceMetadata.get(extraEnv.TOKENTRACKER_DEVICE_TOKEN);
+          if (metadata?.deviceId) extraEnv.TOKENTRACKER_CLOUD_DEVICE_ID = metadata.deviceId;
+        }
         await Promise.all([...activeCloudSyncs].filter(controller => controller.signal.aborted).map(controller => controller.done).filter(Boolean));
         if (extraEnv.TOKENTRACKER_DEVICE_TOKEN && uploadGeneration !== localCloudGeneration) throw Object.assign(new Error("Account session changed"), { code: "auth_session_changed", status: 409 });
         if (extraEnv.TOKENTRACKER_DEVICE_TOKEN && localSyncDeviceTokenUserId) {
-          const binding = JSON.stringify({ ownerId: localSyncDeviceTokenUserId, baseUrl: localSyncBaseUrl || getRuntime().baseUrl });
+          const uploadBaseUrl = localSyncBaseUrl || getRuntime().baseUrl;
+          const reset = readCloudUsageReset(trackerDataDir);
+          if (reset && (reset.ownerId !== localSyncDeviceTokenUserId || reset.baseUrl.replace(/\/$/, "") !== uploadBaseUrl.replace(/\/$/, "") ||
+              (extraEnv.TOKENTRACKER_CLOUD_DEVICE_ID && reset.deviceId !== extraEnv.TOKENTRACKER_CLOUD_DEVICE_ID))) {
+            json(res, { ok: false, code: "cloud_usage_reset_owner_changed" }, 409); return true;
+          }
+          const binding = JSON.stringify({ ownerId: localSyncDeviceTokenUserId, baseUrl: uploadBaseUrl });
           const ownerPath = path.join(path.dirname(qp), "cloud-upload-owner.json");
           let previous = "";
           try { previous = fs.readFileSync(ownerPath, "utf8"); } catch { /* an unbound legacy cursor cannot prove its previous owner */ }
@@ -2279,6 +2387,7 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
         const controller = new AbortController();
         if (extraEnv.TOKENTRACKER_DEVICE_TOKEN) activeCloudSyncs.add(controller);
         const syncStartedAt = Date.now();
+        if (localSyncDeviceTokenUserId) extraEnv.TOKENTRACKER_CLOUD_OWNER_ID = localSyncDeviceTokenUserId;
         extraEnv.TOKENTRACKER_LOCAL_SYNC_ATTEMPT_ID = crypto.randomUUID();
         const syncPromise = runSyncCommand(extraEnv, {
           signal: controller.signal,
@@ -2669,6 +2778,11 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
       const from = url.searchParams.get("from") || "";
       const to = url.searchParams.get("to") || "";
       const requestedSource = (url.searchParams.get("source") || "claude").trim().toLowerCase();
+      const selected = url.searchParams.get("device_id") || "";
+      if (selected.startsWith("local:") ? selected !== `local:${getOrCreateMachineId(qp)}` : !selected && await localUsage.hasImports()) {
+        json(res, { from, to, ...unsupportedCategoryPayload(requestedSource), reason: "local_history_only" });
+        return true;
+      }
       if (requestedSource === "claude") {
         try {
           const result = await computeClaudeCategoryBreakdown({ from, to, projectDir: process.cwd() });
@@ -2930,6 +3044,84 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
           account_view: Boolean(getRefreshTokenForCloud()) && getCloudSyncPref(),
         },
       });
+      return true;
+    }
+
+    // --- provider API keys saved from the Limits panel ---
+    // The key lives in a 0600 file next to the queue, never in the launch
+    // environment: a global `launchctl setenv` reaches every launchd app on
+    // macOS, which is exactly the cross-app leak in #837. GET only reports
+    // whether a key exists and where it came from; it never echoes the secret.
+    if (p === "/functions/tokentracker-provider-key") {
+      const {
+        envNameForProvider,
+        isProviderId,
+        normalizeApiKey,
+        readStoredApiKey,
+        writeStoredApiKey,
+      } = require("./provider-api-key-store");
+      const method = String(req.method || "GET").toUpperCase();
+      if (method === "GET") {
+        const provider = String(url.searchParams.get("provider") || "").trim();
+        if (!isProviderId(provider)) {
+          json(res, { error: "Unknown provider" }, 400);
+          return true;
+        }
+        const envName = envNameForProvider(provider);
+        const envValue = envName ? process.env[envName] : "";
+        const hasEnvKey = typeof envValue === "string" && Boolean(envValue.trim());
+        const hasStoredKey = Boolean(readStoredApiKey({ provider, trackerDir: trackerDataDir }));
+        json(res, {
+          provider,
+          configured: hasEnvKey || hasStoredKey,
+          source: hasEnvKey ? "env" : hasStoredKey ? "stored" : "none",
+        });
+        return true;
+      }
+      if (method === "POST" || method === "PUT") {
+        if (!isAuthorizedLocalMutation(req)) {
+          json(res, { ok: false, error: "Unauthorized" }, 401);
+          return true;
+        }
+        let body;
+        try {
+          body = await readJsonBody(req);
+        } catch {
+          json(res, { ok: false, error: "Invalid JSON body" }, 400);
+          return true;
+        }
+        const provider = typeof body?.provider === "string" ? body.provider.trim() : "";
+        if (!isProviderId(provider)) {
+          json(res, { ok: false, error: "Unknown provider" }, 400);
+          return true;
+        }
+        if (!normalizeApiKey(body?.apiKey)) {
+          json(res, { ok: false, error: "Invalid API key" }, 400);
+          return true;
+        }
+        try {
+          await writeStoredApiKey({ provider, trackerDir: trackerDataDir, apiKey: body.apiKey });
+        } catch {
+          json(res, { ok: false, error: "Could not save the API key" }, 500);
+          return true;
+        }
+        // The in-memory aggregate would otherwise keep serving the previous
+        // credential's row (or "not configured") until its TTL expires.
+        try {
+          const { resetUsageLimitsCache, resolveOpencodeGoLimitsCachePath } = require("./usage-limits");
+          resetUsageLimitsCache({ invalidateInFlight: true });
+          if (provider === "opencode-go") {
+            // The disk snapshot is the stale-bars fallback; it must not
+            // outlive the key that produced it.
+            await fs.promises.unlink(resolveOpencodeGoLimitsCachePath({ trackerDir: trackerDataDir }));
+          }
+        } catch {
+          /* cache invalidation is best effort; the stored key is authoritative */
+        }
+        json(res, { ok: true, configured: true, source: "stored" });
+        return true;
+      }
+      json(res, { error: "Method Not Allowed" }, 405);
       return true;
     }
 
@@ -3502,6 +3694,7 @@ function createLocalApiHandler({ queuePath, serverVersion = null, trackerDataDir
         }
         const data = await getUsageLimits({
           home: os.homedir(),
+          trackerDir: trackerDataDir,
           env: process.env,
           platform: process.platform,
           // Punches through the Claude disk fresh-cache (but not the 429

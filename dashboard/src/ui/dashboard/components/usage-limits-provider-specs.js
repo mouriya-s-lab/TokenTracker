@@ -99,6 +99,10 @@ export const PROVIDER_LIMIT_SPECS = {
     // Grok unified billing is weekly for SuperGrok / free-tier accounts and
     // monthly for legacy credit counters. period_type comes from the billing
     // API (USAGE_PERIOD_TYPE_WEEKLY / MONTHLY) via grok-limits.js.
+    // Products are shares of that same pool, not separate quotas, so they ride
+    // on the pool row as `segments` instead of rows that read as independent
+    // 100% quotas. The headline follows used/remaining. The stack itself is
+    // drawn only in used mode, where the slices add up to that headline.
     windows(data) {
       const period = typeof data.period_type === "string" ? data.period_type : null;
       const primaryLabelKey =
@@ -115,6 +119,8 @@ export const PROVIDER_LIMIT_SPECS = {
           labelKey: primaryLabelKey,
           window: data.primary_window,
           windowSeconds,
+          productPool: true,
+          segments: grokProductSegments(data),
         },
         { key: "ondemand", labelKey: "limits.label.grok_ondemand", window: data.secondary_window },
       ];
@@ -199,6 +205,7 @@ export const PROVIDER_LIMIT_SPECS = {
     windows(data) {
       return [
         { key: "credits", labelKey: "limits.label.qoder_cn_credits", window: data.primary_window },
+        { key: "addon", labelKey: "limits.label.qoder_cn_addon_credits", window: data.tertiary_window },
         {
           key: "ultimate",
           labelKey: "limits.label.qoder_cn_ultimate",
@@ -254,7 +261,44 @@ export const PROVIDER_LIMIT_SPECS = {
       ];
     },
   },
+  workbuddy: {
+    // Subscription plan credits only. Reward grants are not a window.
+    windows(data) {
+      return [
+        { key: "plan", labelKey: "limits.label.workbuddy_plan", window: data.primary_window, creditPrecision: 2, showCreditDetail: true },
+      ];
+    },
+  },
 };
+
+const GROK_PRODUCT_LABEL_KEYS = {
+  GrokBuild: "limits.label.grok_build",
+  GrokBot: "limits.label.grok_bot",
+  GrokChat: "limits.label.grok_chat",
+  GrokImagine: "limits.label.grok_imagine",
+  GrokVoice: "limits.label.grok_voice",
+  Cursor: "limits.label.grok_cursor",
+};
+
+/**
+ * Per-product slices of the pool bar, in API order. Known ids use copy keys; a
+ * future product uses the server label. Null when there is nothing to split,
+ * so the pool falls back to a plain bar.
+ */
+function grokProductSegments(data) {
+  if (!Array.isArray(data?.products)) return null;
+  const segments = [];
+  for (const entry of data.products) {
+    const product = typeof entry?.product === "string" ? entry.product : "";
+    const pct = Number(entry?.window?.used_percent);
+    if (!product || !(pct > 0)) continue;
+    const labelKey = GROK_PRODUCT_LABEL_KEYS[product];
+    const label = typeof entry.label === "string" ? entry.label.trim() : "";
+    if (!labelKey && !label) continue;
+    segments.push({ key: product, ...(labelKey ? { labelKey } : { label }), pct });
+  }
+  return segments.length > 0 ? segments : null;
+}
 
 /** Static copy() anchors for validate:copy — labels resolve at runtime via spec.labelKey. */
 export function usageLimitsLabelCopyAnchor() {
@@ -285,6 +329,12 @@ export function usageLimitsLabelCopyAnchor() {
     copy("limits.label.grok_week"),
     copy("limits.label.grok_day"),
     copy("limits.label.grok_ondemand"),
+    copy("limits.label.grok_build"),
+    copy("limits.label.grok_bot"),
+    copy("limits.label.grok_chat"),
+    copy("limits.label.grok_imagine"),
+    copy("limits.label.grok_voice"),
+    copy("limits.label.grok_cursor"),
     copy("limits.label.antigravity_claude_weekly"),
     copy("limits.label.antigravity_claude_5h"),
     copy("limits.label.antigravity_gemini_weekly"),
@@ -302,6 +352,7 @@ export function usageLimitsLabelCopyAnchor() {
     copy("limits.label.qoder_credits"),
     copy("limits.label.qoder_ultimate"),
     copy("limits.label.qoder_cn_credits"),
+    copy("limits.label.qoder_cn_addon_credits"),
     copy("limits.label.qoder_cn_ultimate"),
     copy("limits.label.command_code_5h"),
     copy("limits.label.command_code_weekly"),

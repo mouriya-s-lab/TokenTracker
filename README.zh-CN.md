@@ -6,7 +6,7 @@
 
 ### 跨所有 CLI，看清你到底在 AI 上花了多少钱
 
-自动采集 **45 款 AI 编码工具** 的 token 用量，全程本地聚合，用一套漂亮的 Dashboard 看真实成本与趋势。不需要云账号、不需要 API Key、不需要任何配置 —— 一条命令搞定。
+自动采集 **47 款 AI 编码工具** 的 token 用量，全程本地聚合，用一套漂亮的 Dashboard 看真实成本与趋势。不需要云账号、不需要 API Key、不需要任何配置 —— 一条命令搞定。
 
 [![npm version](https://img.shields.io/npm/v/tokentracker-cli.svg?color=blue)](https://www.npmjs.com/package/tokentracker-cli)
 [![npm downloads](https://img.shields.io/npm/dm/tokentracker-cli.svg?color=brightgreen)](https://www.npmjs.com/package/tokentracker-cli)
@@ -90,13 +90,13 @@ brew install xiufengsun/tokentracker/tokentracker
 
 ## ✨ 特性
 
-- 🔌 **开箱即用支持 45 款 AI 工具** —— Claude Code、Codex CLI、AStudio、Cursor、Gemini CLI、Kiro、OpenCode、OpenClaw、Every Code、Hermes Agent、GitHub Copilot、Kimi Code、CodeBuddy、WorkBuddy、Grok Build、oh-my-pi、OmO、pi、Dots、Prime Agent、Craft Agents、Reasonix、Kilo CLI、Kilo Code、Roo Code、Antigravity、Zed Agent、Goose、Droid、Mimo Code、DuMate、ZCode、Qoder、AnythingLLM Desktop、Claude Science、DeepSeek Harness、TRAE Work CN、LM Studio、Unsloth Studio、Devin CLI、Cline、MiniMax Code、Command Code、TRAE
+- 🔌 **开箱即用支持 47 款 AI 工具** —— Claude Code、Codex CLI、AStudio、Cursor、Gemini CLI、Kiro、OpenCode、OpenSquilla、OpenClaw、Every Code、Hermes Agent、GitHub Copilot、Kimi Code、CodeBuddy、WorkBuddy、Grok Build、oh-my-pi、OmO、pi、Dots、Prime Agent、Craft Agents、Reasonix、Muse Code、Kilo CLI、Kilo Code、Roo Code、Antigravity、Zed Agent、Goose、Droid、Mimo Code、DuMate、ZCode、Qoder、AnythingLLM Desktop、Claude Science、DeepSeek Harness、TRAE Work CN、LM Studio、Unsloth Studio、Devin CLI、Cline、MiniMax Code、Command Code、TRAE
 - 🏠 **本地优先** —— 跑在本地。直接在本地机器解析日志，无需账号或 API Key。
 - 🚀 **零配置** —— 首次运行自动安装所有 hook。30 秒从零到 Dashboard
 - 📊 **漂亮的 Dashboard** —— 用量趋势、按模型的成本分解、GitHub 风格活跃度热力图、按项目归因
 - 🖥️ **原生桌面 App** —— macOS 菜单栏（含桌面小组件）与 Windows 系统托盘，各自内嵌服务 + 原生 WebView Dashboard
 - 🎨 **4 种桌面小组件** —— 用量 / 热力图 / 热门模型 / 使用限额 直接钉桌面
-- 📈 **实时限额追踪** —— Claude / Codex / Cursor / Gemini / Kimi / Kiro / Grok / Copilot / Antigravity / ZCode / OpenCode Go / Qoder / Qoder CN / Command Code / Ark Coding Plan / Ark Agent Plan / Devin 的配额窗口；本地 provider App 暂时退出时保留 last-good 缓存
+- 📈 **实时限额追踪** —— Claude / Codex / Cursor / Gemini / Kimi / Kiro / Grok / Copilot / Antigravity / ZCode / OpenCode Go / Qoder / Qoder CN / Command Code / Ark Coding Plan / Ark Agent Plan / Devin / WorkBuddy 的配额窗口；本地 provider App 暂时退出时保留 last-good 缓存
 - 🟢 **服务状态页** —— 直接汇总 8 家 provider 官方状态页的实时运行与事故状态
 - 💰 **成本引擎** —— 内置 70+ 模型定价表，精确到 USD
 - 🌐 **可选排行榜** —— 与全球开发者对比；列可拖拽排序，聚焦你关心的 provider（需登录参与）
@@ -175,6 +175,7 @@ brew install xiufengsun/tokentracker/tokentracker
 | **Gemini CLI** | ✅ 自动 | SessionEnd hook |
 | **Antigravity** | ✅ 自动 | 被动读取 transcript.jsonl（`~/.gemini/{antigravity,antigravity-ide,antigravity-cli}/brain/**/transcript.jsonl`） |
 | **OpenCode** | ✅ 自动 | 插件系统 + SQLite |
+| **OpenSquilla** | ✅ 自动 | 被动读取本地 SQLite 中已完成的模型用量（Desktop：`%APPDATA%\@opensquilla\desktop-electron\opensquilla\state\sessions.db`；CLI：`~/.opensquilla/state/sessions.db`）；只读取时间戳、模型 ID 与 token 计数，不读取对话正文。可用 `TOKENTRACKER_OPENSQUILLA_DB` 覆盖路径 |
 | **OpenClaw** | ✅ 自动 | Session 插件 |
 | **Every Code** | ✅ 自动 | TOML notify hook |
 | **Hermes Agent** | ✅ 自动 | SQLite sessions 表（`~/.hermes/state.db`） |
@@ -192,6 +193,7 @@ brew install xiufengsun/tokentracker/tokentracker
 | **Prime Agent** | ✅ 自动 | 仅元数据的被动用量读取（`~/.prime/agent/sessions/*.jsonl`，不读取提示词或回复） |
 | **Craft Agents** | ✅ 自动 | 被动读取 session（`~/.craft-agent` + workspace session logs） |
 | **Reasonix** | ✅ 自动 | 被动读取 telemetry（`~/.reasonix/**/*.jsonl.telemetry.json`） |
+| **Muse Code** | ✅ 自动 | 被动读取会话日志（`~/.local/share/muse/sessions/**/session.jsonl`，可用 `TOKENTRACKER_MUSE_HOME` 覆盖） |
 | **Roo Code** (VS Code 扩展) | ✅ 自动 | 被动读取 `ui_messages.json`（`rooveterinaryinc.roo-cline`） |
 | **Zed Agent** | ✅ 自动 | 被动 SQLite 读取（`threads.db`，仅统计托管的 `zed.dev` 模型） |
 | **Goose** (Block) | ✅ 自动 | 被动 SQLite 读取（`sessions.db`，累计量 delta） |
@@ -216,8 +218,9 @@ brew install xiufengsun/tokentracker/tokentracker
 > - **基于 hook 的工具**（Claude Code、Codex、AStudio、Gemini、Every Code、**CodeBuddy**、**WorkBuddy**、**Grok Build**）—— 我们把 SessionEnd hook 或 TOML notify 条目写入它们自己的配置文件
 > - **基于插件的工具**（OpenCode、**OpenClaw**）—— 插件随 npm 包一起分发。OpenClaw 的 session plugin 位于 `~/.tokentracker/tracker/openclaw-plugin/openclaw-session-sync/`；TokenTracker 会通过 OpenClaw 自己的 CLI 挂接并启用它，然后写入 `hooks.allowConversationAccess=true`，让 OpenClaw 放行触发同步的会话结束事件。无需下载、无需拖拽
 > - **oh-my-pi** —— 被动会话扫描始终是计费/token 的事实来源（`~/.omp/agent/sessions/**/*.jsonl`）。检测到 OMP 时，`tokentracker init` 还会写入托管的 notify 扩展到 `~/.omp/agent/extensions/tokentracker-notify.ts`，以便回合结束后近实时触发同步。仅当文件带有 TokenTracker 托管标记时才视为我们拥有：同名用户自写扩展绝不会被覆盖或删除。`tokentracker uninstall` 也仅在文件仍为托管状态时删除它。
-> - **被动读取类**（Cursor、Kiro、Hermes、Kimi Code、Copilot、**Grok Build**、**pi**、**Craft Agents**、**Reasonix**、**Kilo CLI**、**Kilo Code**、**Roo Code**、**Antigravity**、**Zed Agent**、**Goose**、**Droid**、**Mimo Code**、**DuMate**、**ZCode**、**Qoder**、**LM Studio**、**Unsloth Studio**、**AnythingLLM Desktop**、**Devin CLI**、**MiniMax Code**、**Claude Science**、**DeepSeek Harness**、**Cline**) —— 完全不往它们里面塞东西，只读取它们自己产生的文件（SQLite DB、JSONL、OTEL 导出、会话轨迹日志）。Copilot App / CLI 的用量按请求读取 `~/.copilot/session-store.db`；`data.db` 只提供一次旧数据迁移基线，并在 store 成为主源后保持仅观察，Chat 扩展和旧版 CLI 继续使用 OTEL。TokenTracker 会协调这些数据源，使重叠请求只统计一次。迁移前无法无损拆分模型的 App/CLI 混合历史会保留为 `github-copilot-legacy` 聚合量，而不会猜测请求模型
+> - **被动读取类**（Cursor、Kiro、Hermes、Kimi Code、Copilot、**Grok Build**、**pi**、**Craft Agents**、**Reasonix**、**Muse Code**、**Kilo CLI**、**Kilo Code**、**Roo Code**、**Antigravity**、**Zed Agent**、**Goose**、**Droid**、**Mimo Code**、**DuMate**、**ZCode**、**Qoder**、**LM Studio**、**Unsloth Studio**、**OpenSquilla**、**AnythingLLM Desktop**、**Devin CLI**、**MiniMax Code**、**Claude Science**、**DeepSeek Harness**、**Cline**) —— 完全不往它们里面塞东西，只读取它们自己产生的文件（SQLite DB、JSONL、OTEL 导出、会话轨迹日志）。Copilot App / CLI 的用量按请求读取 `~/.copilot/session-store.db`；`data.db` 只提供一次旧数据迁移基线，并在 store 成为主源后保持仅观察，Chat 扩展和旧版 CLI 继续使用 OTEL。TokenTracker 会协调这些数据源，使重叠请求只统计一次。迁移前无法无损拆分模型的 App/CLI 混合历史会保留为 `github-copilot-legacy` 聚合量，而不会猜测请求模型
 > - **Grok Build 估算说明** —— Grok 当前本地遥测提供 `updates.jsonl` 里的累计 `totalTokens`，但还没有稳定的输入/输出/cache 拆分；`signals.json` 仍作为 `contextTokensUsed` 快照兜底。所以在 Grok 提供按调用粒度的用量明细之前，TokenTracker 对 Grok 成本仍是估算值
+> - **Grok 产品占比** —— Grok 限额卡片默认只用一根进度条显示共享的每周或每月额度的总用量。展开卡片（macOS 菜单栏中点击该卡片）后，这根进度条会按产品拆分成多段（Grok Build、聊天、语音、Imagine，以及账单接口返回的其他产品），并在下方用图例列出各产品的占比。这些分段是同一个上限的拆分，不是各自独立的配额，因此这根进度条在「剩余」模式下也始终显示已用百分比。
 >
 > 任何时候都可以用 `tokentracker status` 查看每个集成的状态。如果显示 `skipped`，`detail` 列会解释原因（例如某工具 CLI 不在 `PATH` 上、config 不可读等）。
 >
@@ -233,12 +236,12 @@ brew install xiufengsun/tokentracker/tokentracker
 
 | 功能维度 | **[TokenTracker](https://github.com/xiufengsun/TokenTracker)** | **[ccusage](https://github.com/ccusage/ccusage)** | **[Tokscale](https://github.com/junhoyeo/tokscale)** |
 |---|:---:|:---:|:---:|
-| **支持的 AI 工具数** | **45** | 多 Agent / 工具支持 | 多 Agent / 工具支持 |
+| **支持的 AI 工具数** | **47** | 多 Agent / 工具支持 | 多 Agent / 工具支持 |
 | **主要交互方式** | 原生桌面 App 与 Web Dashboard | 终端命令行（CLI） | 终端 TUI 与 CLI |
 | **本地优先分析** | ✅ | ✅ | ✅ |
 | **原生桌面 App** | ✅ macOS、Windows、Linux | ❌ | ❌ |
 | **桌面小组件** | ✅ 4 个小组件 | ❌ | ❌ |
-| **限额追踪** | ✅ 17 家 provider | 较少（Claude 周期/用量） | 覆盖多个 provider |
+| **限额追踪** | ✅ 18 家 provider | 较少（Claude 周期/用量） | 覆盖多个 provider |
 | **终端数据分析** | 基础 CLI（`status`、`--json`） | 完善的 CLI 报表能力 | 丰富的交互式 TUI 与 CLI |
 | **JSON 导出** | ✅ | ✅ | ✅ |
 | **公开排行榜** | 可选（需主动登录参与） | ❌ | 可选（`submit`） |
@@ -266,7 +269,7 @@ flowchart LR
 
 ---
 
-本地功能继续完整免费开源。可选官方 Cloud 提供托管跨设备分析，仍在开发，见[方案、试用与过渡规则](docs/cloud-guide.zh-CN.md)。Waffo 测试价格草案采用全球相同的美元未税基础价，自动续费和按期购买均为 $4.99/月、$39.99/年，税费和最终金额由收银台显示。软件也允许免费自部署，服务器与维护自理，完整安装目前为[自部署技术预览](docs/self-hosting.zh-CN.md)。
+本地功能继续完整免费开源。可选官方 [TokenTracker Cloud](https://www.tokentracker.cc/cloud) 提供托管跨设备分析；计划、试用与过渡规则见[云服务说明](docs/cloud-guide.zh-CN.md)。正式购买已开放，全球统一美元未税基础价，自动续费与按期购买均为 $4.99/月、$39.99/年，税费和最终金额由 Waffo 收银台显示。软件也允许免费自部署，服务器与维护自理，完整安装目前为[自部署技术预览](docs/self-hosting.zh-CN.md)。
 
 ## 🛡️ 隐私
 
@@ -279,7 +282,7 @@ TokenTracker 在本地处理你的用量数据。绝不收集或上传 prompt、
 | **不收集代码与 Prompt** | TokenTracker 解析本地日志文件中的 token 数量与时间戳。Prompt、回复正文、代码和对话内容绝不保存或上传。 |
 | **默认本地优先** | 用量追踪完全跑在你的本地机器上。无需账号、登录或 API Key。云端同步与公开排行榜完全属于自选（Opt-in）。 |
 | **可公开审计** | 完全开源。欢迎查阅 [`src/lib/rollout.js`](src/lib/rollout.js) —— 仅提取数字、时间戳与模型名称。 |
-| **透明的网络请求** | 完整披露于[隐私政策](docs/PRIVACY.md)。默认发起的网络请求仅限于：直接查询 provider 配额（使用你机器上已有的本地凭证）、获取 GitHub Star 数与检查更新、更新定价数据（`raw.githubusercontent.com`），以及匿名产品遥测（每日一次心跳和 PostHog 页面访问，均可通过 `TOKENTRACKER_NO_TELEMETRY=1` 或 `DO_NOT_TRACK=1` 关闭）。遥测绝不包含 token、模型名、prompt 或代码。 |
+| **透明的网络请求** | 完整披露于[隐私政策](docs/PRIVACY.md)。默认发起的网络请求仅限于：直接查询 provider 配额（使用你机器上已有的本地凭证）、获取 GitHub Star 数与检查更新、更新定价数据（`raw.githubusercontent.com`），以及匿名产品遥测（每日一次心跳、PostHog 页面访问，以及在配置了 DSN 时可选的 Sentry 错误上报——均可通过 `TOKENTRACKER_NO_TELEMETRY=1` 或 `DO_NOT_TRACK=1` 关闭）。遥测绝不包含 token、模型名、prompt 或代码。 |
 
 ---
 

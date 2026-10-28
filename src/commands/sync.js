@@ -5,6 +5,9 @@ const fssync = require("node:fs");
 const cp = require("node:child_process");
 const readline = require("node:readline");
 const { functionUrlFor, fetchFunctionResponse } = require("../lib/function-url");
+const { cloudUsageResetBlocksUpload, finishCloudDeviceUsageReset } = require("../lib/cloud-usage-reset");
+const { KIMI_MODEL_REPAIR_KEY, repairKimiModelAttribution } = require("../lib/kimi-model-repair");
+const { readSqliteJsonRows } = require("../lib/sqlite-reader");
 
 const { resolveInstallPaths, resolveZcodeNativeDbPath, resolveMimoNativeDbPath, ensureFlatCursor } = require("../lib/install-resolver");
 const { multiInstallParse, mergeBothFileSources } = require("../lib/multi-install-parser");
@@ -24,6 +27,7 @@ const { countRecordOnlyFiles, formatRecordOnlyWarning } = require("../lib/codex-
 const {
   listRolloutFiles,
   listRolloutFilesDeep,
+  readCodexRolloutSnapshot,
   codexSessionIdFromPath,
   filterColdCodexRolloutFiles,
   listClaudeProjectFiles,
@@ -100,6 +104,8 @@ const {
   parseCraftIncremental,
   resolveReasonixTelemetryFiles,
   parseReasonixIncremental,
+  resolveMuseSessionFiles,
+  parseMuseIncremental,
   resolveGrokBuildSessions,
   parseGrokBuildIncremental,
   resolveAntigravityDbPath,
@@ -123,6 +129,8 @@ const {
   parseZedIncremental,
   resolveLmstudioLogFiles,
   parseLmstudioIncremental,
+  resolveOpenSquillaDbPaths,
+  parseOpenSquillaIncremental,
   resolveUnslothDbPath,
   parseUnslothIncremental,
   resolveAnythingllmDbPath,
@@ -145,6 +153,7 @@ const {
   toUtcHalfHourStart,
   totalsKey,
   claudeMessageDedupKey,
+  coerceEpochMs,
   hasZcodeCursorState,
   resolveZcodeInstallPaths,
 } = require("../lib/rollout");
@@ -195,6 +204,18 @@ const {
   scanRootDirState,
 } = require("../lib/scan-roots");
 const { resolveRuntimeConfig, isLegacyInsforgeBaseUrl } = require("../lib/runtime-config");
+const { resolveDeviceTokenPresence } = require("../lib/cloud-device-token");
+
+function formatSyncUploadSummaryLine({ runtimeDeviceToken, uploadResult, tokenPresentOnDisk }) {
+  if (runtimeDeviceToken) {
+    return `- Uploaded: ${uploadResult.inserted} inserted, ${uploadResult.skipped} skipped`;
+  }
+  if (tokenPresentOnDisk) {
+    return "- Uploaded: skipped (handled by local server; device token is set)";
+  }
+  return "- Uploaded: skipped (no device token)";
+}
+
 const { extractTokenCount } = require("../lib/codex-rollout-parser");
 const {
   consumeUsageDelta,
@@ -307,6 +328,13 @@ const MIMO_PROVIDER_REPAIR_KEY = "mimoClaudeMislabelRepair_2026_06";
 const DSH_LEGACY_SOURCE_MIGRATION_KEY = "deepseekHarnessSourceMigration_2026_08";
 const ZCODE_NATIVE_USAGE_REPAIR_KEY = "zcodeNativeUsageRepair_2026_08";
 const ZCODE_INCLUSIVE_TOKEN_REPAIR_KEY = "zcodeInclusiveTokenRepair_2026_09";
+// #828: ZCode CLI prunes model_usage/turn_usage to ~30 days. The wipe+rescan
+// repairs above destroyed pre-window history for late upgraders (and anyone
+// whose prune line advanced before the one-shot key fired). This follow-up
+// restores pre-window peaks from queue.jsonl.bak.* when the live ledger is
+// lower, and the wipe helpers below now preserve hours older than the live
+// rebuild floor so a future re-key cannot repeat the loss.
+const ZCODE_PRUNE_WINDOW_RESTORE_KEY = "zcodePruneWindowRestore_2026_10";
 const AUTO_SYNC_SOURCE_ALIASES = new Map([
   ["code", "every-code"],
   ["commandcode", "command-code"],
@@ -347,10 +375,12 @@ const AUTO_SYNC_SOURCES = new Set([
   "lmstudio",
   "mimo",
   "minimax-code",
+  "muse",
   "omo",
   "omp",
   "opencode",
   "openclaw",
+  "opensquilla",
   "pi",
   "qoder",
   "qoder-cn",
@@ -369,6 +399,7 @@ const BACKGROUND_AUTO_SYNC_SOURCES = new Set([
   "acode",
   "codex",
   "every-code",
+  "muse",
   "reasonix",
 ]);
 
@@ -542,7 +573,13 @@ async function cmdSync(argv, context = {}) {
   // Hooks, native publication and detached retries must honor the saved opt-in.
   const requiresCloudSyncPref = opts.auto || opts.background || opts.fromRetry || opts.fromNotify || opts.fromOpenclaw ||
     Boolean(process.env.TOKENTRACKER_LOCAL_SYNC_ATTEMPT_ID);
-  const canUpload = () => !requiresCloudSyncPref || readCloudSyncEnabled(trackerDir);
+  let cloudResetRuntime = null;
+  const canUpload = () => !cloudUsageResetBlocksUpload(trackerDir, {
+    ownerId: process.env.TOKENTRACKER_CLOUD_OWNER_ID,
+    baseUrl: cloudResetRuntime?.baseUrl || process.env.TOKENTRACKER_INSFORGE_BASE_URL,
+    deviceId: process.env.TOKENTRACKER_CLOUD_DEVICE_ID,
+  }) &&
+    (!requiresCloudSyncPref || readCloudSyncEnabled(trackerDir));
 
   await ensureDir(trackerDir);
   if (opts.fromOpenclaw) {
@@ -1757,6 +1794,8 @@ async function cmdSync(argv, context = {}) {
           const nativeUsageAvailable = [zcodePaths.native, zcodePaths.wsl]
             .filter(Boolean)
             .some((dbPath) => hasZcodeNativeUsageSchema(dbPath));
+          const zcodeDbPaths = [zcodePaths.native, zcodePaths.wsl].filter(Boolean);
+          const zcodeRebuildFloorMs = resolveZcodeRebuildFloorMs(zcodeDbPaths);
           if (nativeUsageAvailable) {
             await repairZcodeNativeUsageMigration({
               cursors,
@@ -1764,6 +1803,7 @@ async function cmdSync(argv, context = {}) {
               queueStatePath,
               projectQueuePath,
               projectQueueStatePath,
+              rebuildFloorMs: zcodeRebuildFloorMs,
             });
           }
           await repairZcodeInclusiveTokenMigration({
@@ -1772,6 +1812,13 @@ async function cmdSync(argv, context = {}) {
             queueStatePath,
             projectQueuePath,
             projectQueueStatePath,
+            rebuildFloorMs: zcodeRebuildFloorMs,
+          });
+          await repairZcodePruneWindowRestore({
+            cursors,
+            queuePath,
+            queueStatePath,
+            dbPaths: zcodeDbPaths,
           });
           zcodeResult = await multiInstallParse({
             paths: zcodePaths, parserFn: parseOpencodeDbForInstall, providerName: "zcode",
@@ -1902,6 +1949,25 @@ async function cmdSync(argv, context = {}) {
           });
         } catch (err) {
           warnProviderParseFailure("Unsloth", err, opts);
+        }
+      }
+    }
+
+    let opensquillaResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    if (sourceAllowed("opensquilla")) {
+      const opensquillaDbPaths = resolveOpenSquillaDbPaths(process.env)
+        .filter((dbPath) => fssync.existsSync(dbPath));
+      if (opensquillaDbPaths.length > 0) {
+        if (progress?.enabled) progress.start("Parsing OpenSquilla " + renderBar(0) + " | buckets 0");
+        try {
+          opensquillaResult = await parseOpenSquillaIncremental({
+            dbPaths: opensquillaDbPaths,
+            cursors,
+            queuePath,
+            onProgress: makeProviderProgress("OpenSquilla"),
+          });
+        } catch (err) {
+          warnProviderParseFailure("OpenSquilla", err, opts);
         }
       }
     }
@@ -2508,6 +2574,17 @@ async function cmdSync(argv, context = {}) {
     const kimiWireFiles = sourceAllowed("kimi")
       ? mergeBothFileSources({ resolveFiles: resolveKimiWireFiles, env: process.env })
       : [];
+    const kimiCodeWireFiles = sourceAllowed("kimi-code")
+      ? mergeBothFileSources({ resolveFiles: resolveKimiCodeWireFiles, env: process.env })
+      : [];
+    if (isFullSourceScan && sourceAllowed("kimi") && sourceAllowed("kimi-code")) {
+      await repairKimiModelAttribution({
+        cursors, queuePath, queueStatePath,
+        legacyFiles: kimiWireFiles, officialFiles: kimiCodeWireFiles,
+        parseLegacy: parseKimiIncremental, parseOfficial: parseKimiCodeIncremental,
+        env: process.env,
+      });
+    }
     if (kimiWireFiles.length > 0) {
       if (progress?.enabled) {
         progress.start(`Parsing Kimi Code ${renderBar(0)} | buckets 0`);
@@ -2533,9 +2610,6 @@ async function cmdSync(argv, context = {}) {
 
     // ── Kimi Code official (@moonshot-ai/kimi-code, ~/.kimi-code) ──
     let kimiCodeResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
-    const kimiCodeWireFiles = sourceAllowed("kimi-code")
-      ? mergeBothFileSources({ resolveFiles: resolveKimiCodeWireFiles, env: process.env })
-      : [];
     if (kimiCodeWireFiles.length > 0) {
       if (progress?.enabled) {
         progress.start(`Parsing Kimi Code (official) ${renderBar(0)} | buckets 0`);
@@ -2614,7 +2688,7 @@ async function cmdSync(argv, context = {}) {
     // usage rides on function_call records too (not only assistant messages) and
     // sub-agent logs nest one level deeper, so the resolver recurses. See the
     // parser comment in rollout.js for the cache-aware token math.
-    let workbuddyResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    let workbuddyResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0, projectCursorUpdated: false };
     const workbuddyFiles = sourceAllowed("workbuddy")
       ? mergeBothFileSources({ resolveFiles: resolveWorkbuddyProjectFiles, env: process.env })
       : [];
@@ -2640,6 +2714,7 @@ async function cmdSync(argv, context = {}) {
           projectFiles: workbuddyFiles,
           cursors,
           queuePath,
+          projectQueuePath,
           env: process.env,
           onProgress: (p) => {
             if (!progress?.enabled) return;
@@ -2659,7 +2734,7 @@ async function cmdSync(argv, context = {}) {
     // only the home directory differs, so it reuses the WorkBuddy parser and
     // gets its own source key (and cursor namespace) so the two builds stay
     // separable instead of merging into one provider row.
-    let workbuddyAiResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    let workbuddyAiResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0, projectCursorUpdated: false };
     const workbuddyAiFiles = sourceAllowed("workbuddy-ai")
       ? mergeBothFileSources({
           resolveFiles: (resolveEnv) => resolveWorkbuddyProjectFiles(resolveEnv, "workbuddy-ai"),
@@ -2675,6 +2750,7 @@ async function cmdSync(argv, context = {}) {
           projectFiles: workbuddyAiFiles,
           cursors,
           queuePath,
+          projectQueuePath,
           env: process.env,
           source: "workbuddy-ai",
           onProgress: (p) => {
@@ -2896,6 +2972,25 @@ async function cmdSync(argv, context = {}) {
         });
       } catch (err) {
         warnProviderParseFailure("Reasonix", err, opts);
+      }
+    }
+
+    // Muse Code (Meta) — usage counts from per-session session.jsonl logs.
+    let museResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
+    const museFiles = sourceAllowed("muse")
+      ? mergeBothFileSources({ resolveFiles: resolveMuseSessionFiles, env: process.env })
+      : [];
+    if (museFiles.length > 0) {
+      try {
+        museResult = await parseMuseIncremental({
+          sessionFiles: museFiles,
+          cursors,
+          queuePath,
+          env: process.env,
+          onProgress: makeProviderProgress("Muse"),
+        });
+      } catch (err) {
+        warnProviderParseFailure("Muse", err, opts);
       }
     }
 
@@ -3357,10 +3452,12 @@ async function cmdSync(argv, context = {}) {
       minimaxCodeResult.recordsProcessed +
       craftResult.recordsProcessed +
       reasonixResult.recordsProcessed +
+      museResult.recordsProcessed +
       grokResult.recordsProcessed +
       copilotResult.recordsProcessed +
       lmstudioResult.recordsProcessed +
       unslothResult.recordsProcessed +
+      opensquillaResult.recordsProcessed +
       anythingllmResult.recordsProcessed +
       devinResult.recordsProcessed +
       kiloResult.recordsProcessed +
@@ -3403,10 +3500,12 @@ async function cmdSync(argv, context = {}) {
       minimaxCodeResult.bucketsQueued +
       craftResult.bucketsQueued +
       reasonixResult.bucketsQueued +
+      museResult.bucketsQueued +
       grokResult.bucketsQueued +
       copilotResult.bucketsQueued +
       lmstudioResult.bucketsQueued +
       unslothResult.bucketsQueued +
+      opensquillaResult.bucketsQueued +
       anythingllmResult.bucketsQueued +
       devinResult.bucketsQueued +
       kiloResult.bucketsQueued +
@@ -3428,12 +3527,17 @@ async function cmdSync(argv, context = {}) {
       cursorStore.requiresCommit !== true &&
       totalParsed === (commandCodeResult.cursorUnchanged ? commandCodeResult.recordsProcessed : 0) &&
       totalBuckets === 0 &&
+      !(workbuddyResult.projectBucketsQueued > 0) &&
+      !(workbuddyAiResult.projectBucketsQueued > 0) &&
+      !workbuddyResult.projectCursorUpdated &&
+      !workbuddyAiResult.projectCursorUpdated &&
       !(grokResult.projectBucketsQueued > 0) &&
       !(commandCodeResult.projectBucketsQueued > 0) &&
       !commandCodeResult.schemaMigrated &&
       !codexColdAuditDue &&
       !codexFallbackRetryRan &&
       !grokHookSignalConsumed &&
+      !cursors.migrations?.[KIMI_MODEL_REPAIR_KEY]?.pendingCompaction &&
       !opts.repairGrok;
 
     if (syncDiagnostics) {
@@ -3457,6 +3561,12 @@ async function cmdSync(argv, context = {}) {
       await cursorStore.writeDeferredCodexAuditSyncs(
         deferredCodexAuditSyncs + 1,
       );
+    }
+    if (cursors.migrations?.[KIMI_MODEL_REPAIR_KEY]?.pendingCompaction) {
+      const state = (await readJson(queueStatePath)) || { offset: 0 };
+      await compactPendingQueue({ queuePath, offset: Number(state.offset || 0), minPendingBytes: 0 });
+      cursors.migrations[KIMI_MODEL_REPAIR_KEY].pendingCompaction = false;
+      await cursorStore.commit(cursors);
     }
     if (grokHookSignalConsumed && grokHookSignalPath) {
       await fs.unlink(grokHookSignalPath).catch(() => {});
@@ -3490,6 +3600,7 @@ async function cmdSync(argv, context = {}) {
     const runtime = Object.hasOwn(process.env, "TOKENTRACKER_LOCAL_SYNC_DEVICE_TOKEN")
       ? { ...resolvedRuntime, deviceToken: resolvedRuntime.configurationError ? null : process.env.TOKENTRACKER_LOCAL_SYNC_DEVICE_TOKEN }
       : resolvedRuntime;
+    cloudResetRuntime = runtime;
 
     let uploadResult = { inserted: 0, skipped: 0 };
     let uploadAttempted = false;
@@ -3658,6 +3769,12 @@ async function cmdSync(argv, context = {}) {
     // and can keep auto retry alive even after cloud sync has drained.
     const pendingBytes = Math.max(0, queueSize - Number(afterState.offset || 0));
 
+    if (pendingBytes === 0 && canUpload() && runtime.deviceToken) {
+      await finishCloudDeviceUsageReset({ trackerDir, ownerId: process.env.TOKENTRACKER_CLOUD_OWNER_ID,
+        baseUrl: runtime.baseUrl, anonKey: runtime.anonKey, deviceToken: runtime.deviceToken,
+        deviceId: process.env.TOKENTRACKER_CLOUD_DEVICE_ID });
+    }
+
     if (pendingBytes <= 0 || !canUpload()) {
       await clearAutoRetry(trackerDir);
     } else if (opts.auto && uploadAttempted && !opts.publishAccount) {
@@ -3682,9 +3799,11 @@ async function cmdSync(argv, context = {}) {
           "Sync finished:",
           `- Parsed files: ${totalParsed}`,
           `- New 30-min buckets queued: ${totalBuckets}`,
-          runtime.deviceToken
-            ? `- Uploaded: ${uploadResult.inserted} inserted, ${uploadResult.skipped} skipped`
-            : "- Uploaded: skipped (no device token)",
+          formatSyncUploadSummaryLine({
+            runtimeDeviceToken: runtime.deviceToken,
+            uploadResult,
+            tokenPresentOnDisk: resolveDeviceTokenPresence({ trackerDir, config, runtime }).set,
+          }),
           runtime.deviceToken && pendingBytes > 0 && !opts.drain
             ? `- Remaining: ${formatBytes(pendingBytes)} pending (run sync again, or use --drain)`
             : null,
@@ -3819,6 +3938,7 @@ function recordCodexColdScanAudit(
 }
 
 module.exports = {
+  formatSyncUploadSummaryLine,
   cmdSync,
   acquireSyncLock,
   readQueueBatch,
@@ -3837,6 +3957,9 @@ module.exports = {
   repairMimoClaudeMislabel,
   repairZcodeNativeUsageMigration,
   repairZcodeInclusiveTokenMigration,
+  repairZcodePruneWindowRestore,
+  resolveZcodeRebuildFloorMs,
+  ZCODE_PRUNE_WINDOW_RESTORE_KEY,
   reincludeClaudeMemObserverFiles,
   repairGrokQueueFromSessionSnapshots,
   applyCloudConversationsBackfill,
@@ -4881,17 +5004,194 @@ async function resetUploadOffsetForZcodeRepair(queueStatePath, note) {
   return true;
 }
 
-async function dropZcodeQueueRows(filePath, { retainRetractions = false } = {}) {
+function zcodeHourStartMs(hourStart) {
+  if (typeof hourStart !== "string" || !hourStart.trim()) return null;
+  const ms = Date.parse(hourStart);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function zcodeHourFromMainBucketKey(key) {
+  if (typeof key !== "string" || !key.startsWith("zcode|")) return null;
+  const parts = key.split("|");
+  return parts.length >= 3 ? parts.slice(2).join("|") : null;
+}
+
+function zcodeHourFromProjectBucketKey(key) {
+  if (typeof key !== "string") return null;
+  const marker = "|zcode|";
+  const idx = key.indexOf(marker);
+  if (idx < 0) return null;
+  const hour = key.slice(idx + marker.length);
+  return hour || null;
+}
+
+function zcodeHourFromGroupQueuedKey(key) {
+  if (typeof key !== "string" || !key.startsWith("zcode|")) return null;
+  return key.slice("zcode|".length) || null;
+}
+
+function zcodeHourIsPreWindow(hourStart, preserveBeforeMs) {
+  if (!Number.isFinite(preserveBeforeMs)) return false;
+  const hourMs = zcodeHourStartMs(hourStart);
+  return hourMs != null && hourMs < preserveBeforeMs;
+}
+
+// Per-install rebuild floor. Prefer native model_usage MIN(started_at) when the
+// native schema exists — an ancient legacy message does not prove continuous
+// coverage through pruned native gaps (#828).
+function resolveZcodeDbRebuildFloorMs(dbPath) {
+  if (!dbPath || !fssync.existsSync(dbPath)) return null;
+  if (hasZcodeNativeUsageSchema(dbPath)) {
+    try {
+      const rows = readSqliteJsonRows(
+        dbPath,
+        `SELECT MIN(started_at) AS floor
+           FROM model_usage
+          WHERE status = 'completed'
+            AND trim(model_id) != ''
+            AND (
+              input_tokens > 0 OR output_tokens > 0 OR reasoning_tokens > 0 OR
+              cache_creation_input_tokens > 0 OR cache_read_input_tokens > 0
+            )`,
+        { label: "ZCode", timeout: 10_000, maxBuffer: 1024 * 1024, readOnly: true },
+      );
+      const floor = coerceEpochMs(Array.isArray(rows) ? rows[0]?.floor : null);
+      return floor > 0 ? floor : null;
+    } catch (_error) {
+      return null;
+    }
+  }
+  let messages;
+  try {
+    messages = readZcodeDbMessages(dbPath, { readOnly: true });
+  } catch (_error) {
+    return null;
+  }
+  let floor = Number.POSITIVE_INFINITY;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const ms = coerceEpochMs(
+      message?.timeUpdated ?? message?.data?.time?.completed ?? message?.data?.time?.created,
+    );
+    if (ms > 0) floor = Math.min(floor, ms);
+  }
+  return Number.isFinite(floor) ? floor : null;
+}
+
+// Shared wipe window across installs: the LATEST per-install floor (most
+// conservative). Any listed install that exists but cannot report a floor
+// defers the wipe — silently taking min() would erase another install's history.
+function resolveZcodeRebuildFloorMs(dbPaths = []) {
+  const paths = [...new Set((Array.isArray(dbPaths) ? dbPaths : []).filter(Boolean))];
+  if (paths.length === 0) return null;
+  let latestFloor = 0;
+  for (const dbPath of paths) {
+    if (!fssync.existsSync(dbPath)) continue;
+    const floor = resolveZcodeDbRebuildFloorMs(dbPath);
+    if (!Number.isFinite(floor)) return null;
+    latestFloor = Math.max(latestFloor, floor);
+  }
+  return latestFloor > 0 ? latestFloor : null;
+}
+
+// Wipe starts at the half-hour bucket that contains the first live message so
+// that bucket is rebuilt (not preserved) and cannot be double-counted after
+// cursors.zcode is cleared.
+function zcodePreserveBeforeMsFromFloor(floorMs) {
+  if (!Number.isFinite(floorMs)) return null;
+  const iso = toUtcHalfHourStart(floorMs);
+  const ms = iso ? Date.parse(iso) : floorMs;
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function hasZcodeCursorHistory(cursors) {
+  return hasZcodeCursorState(cursors);
+}
+
+function pruneZcodeMessageIndexForRebuild(messages, preserveBeforeMs) {
+  if (!messages || typeof messages !== "object") return 0;
+  let removed = 0;
+  for (const key of Object.keys(messages)) {
+    const entry = messages[key];
+    const attribution = typeof entry?.attribution === "string"
+      ? entry.attribution.split("	")[0]
+      : entry?.attribution?.bucketStart;
+    const bucketStart = typeof attribution === "string" ? attribution : "";
+    // Keep unattributed entries: older cursors omit attribution, and deleting
+    // them re-adds still-present pre-window legacy messages onto preserved
+    // buckets (5000→10000). Prefer a possible in-window under-correction over
+    // permanent double-count (#828).
+    if (!bucketStart) continue;
+    if (zcodeHourIsPreWindow(bucketStart, preserveBeforeMs)) continue;
+    delete messages[key];
+    removed += 1;
+  }
+  return removed;
+}
+
+function pruneZcodeMessageCursorForRebuild(cursors, preserveBeforeMs) {
+  if (!cursors || typeof cursors !== "object") return;
+  if (!Number.isFinite(preserveBeforeMs)) {
+    delete cursors.zcode;
+    return;
+  }
+  const root = cursors.zcode;
+  if (!root || typeof root !== "object") {
+    delete cursors.zcode;
+    return;
+  }
+  pruneZcodeMessageIndexForRebuild(root.messages, preserveBeforeMs);
+  for (const nestedKey of ["native", "wsl"]) {
+    const nested = root[nestedKey];
+    if (nested && typeof nested === "object") {
+      pruneZcodeMessageIndexForRebuild(nested.messages, preserveBeforeMs);
+    }
+  }
+  const hasMessages = Object.keys(root.messages || {}).length > 0
+    || Object.keys(root.native?.messages || {}).length > 0
+    || Object.keys(root.wsl?.messages || {}).length > 0;
+  if (!hasMessages) delete cursors.zcode;
+}
+
+async function queueFileHasZcodeRows(filePath) {
+  if (typeof filePath !== "string" || !filePath) return false;
   let raw;
   try {
     raw = await fs.readFile(filePath, "utf8");
   } catch (error) {
-    if (error?.code === "ENOENT") return { removed: 0, retractions: 0 };
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const row = JSON.parse(line);
+      if (row?.source === "zcode") return true;
+    } catch (_error) {
+      // keep scanning
+    }
+  }
+  return false;
+}
+
+function isCompletedZcodeMigration(entry) {
+  return Boolean(entry) && !(typeof entry === "object" && entry.skipped);
+}
+
+async function dropZcodeQueueRows(filePath, {
+  retainRetractions = false,
+  preserveBeforeMs = null,
+} = {}) {
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { removed: 0, retractions: 0, preserved: 0 };
     throw error;
   }
   const kept = [];
   const retractions = new Map();
   let removed = 0;
+  let preserved = 0;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let row;
@@ -4902,11 +5202,17 @@ async function dropZcodeQueueRows(filePath, { retainRetractions = false } = {}) 
       continue;
     }
     if (row?.source === "zcode") {
-      removed += 1;
       const model = typeof row.model === "string" && row.model.trim()
         ? row.model.trim()
         : "unknown";
       const hourStart = typeof row.hour_start === "string" ? row.hour_start : "";
+      // #828: keep pre-window rows intact — the live DB cannot rebuild them.
+      if (zcodeHourIsPreWindow(hourStart, preserveBeforeMs)) {
+        kept.push(line);
+        preserved += 1;
+        continue;
+      }
+      removed += 1;
       if (retainRetractions && hourStart) {
         retractions.set(`${model}|${hourStart}`, {
           source: "zcode",
@@ -4925,7 +5231,7 @@ async function dropZcodeQueueRows(filePath, { retainRetractions = false } = {}) 
     }
     kept.push(line);
   }
-  if (removed === 0) return { removed: 0, retractions: 0 };
+  if (removed === 0) return { removed: 0, retractions: 0, preserved };
   await backupExistingFile(filePath);
   const tmp = `${filePath}.zcoderepair.${process.pid}.${Date.now()}`;
   const rewritten = [
@@ -4934,7 +5240,7 @@ async function dropZcodeQueueRows(filePath, { retainRetractions = false } = {}) 
   ];
   await fs.writeFile(tmp, rewritten.length ? rewritten.join("\n") + "\n" : "", "utf8");
   await fs.rename(tmp, filePath);
-  return { removed, retractions: retractions.size };
+  return { removed, retractions: retractions.size, preserved };
 }
 
 async function repairZcodeUsageMigration({
@@ -4945,25 +5251,52 @@ async function repairZcodeUsageMigration({
   queueStatePath,
   projectQueuePath,
   projectQueueStatePath,
+  rebuildFloorMs = null,
 } = {}) {
   if (!cursors || typeof cursors !== "object") return false;
   const migrations = (cursors.migrations ||= {});
-  if (migrations[migrationKey]) return false;
+  // Mirror Codex: a prior {skipped:true} must retry once the live ledger can
+  // establish a rebuild floor (or the pre-window history is gone).
+  const prior = migrations[migrationKey];
+  if (isCompletedZcodeMigration(prior)) return false;
 
-  const mainRepair = await dropZcodeQueueRows(queuePath, { retainRetractions: true });
+  const preserveBeforeMs = zcodePreserveBeforeMsFromFloor(rebuildFloorMs);
+  // Empty / unreadable live ledger + existing history => refuse the wipe. The
+  // forward reader still works; only this historical correction defers (#828).
+  if (preserveBeforeMs == null) {
+    const hasQueueHistory = await queueFileHasZcodeRows(queuePath)
+      || await queueFileHasZcodeRows(projectQueuePath);
+    if (hasZcodeCursorHistory(cursors) || hasQueueHistory) {
+      migrations[migrationKey] = {
+        skipped: true,
+        reason: "zcode_rebuild_floor_unavailable",
+        at: new Date().toISOString(),
+      };
+      return false;
+    }
+  }
+
+  const mainRepair = await dropZcodeQueueRows(queuePath, {
+    retainRetractions: true,
+    preserveBeforeMs,
+  });
   const projectRepair = projectQueuePath
-    ? await dropZcodeQueueRows(projectQueuePath)
-    : { removed: 0, retractions: 0 };
+    ? await dropZcodeQueueRows(projectQueuePath, { preserveBeforeMs })
+    : { removed: 0, retractions: 0, preserved: 0 };
 
   const hourly = cursors.hourly && typeof cursors.hourly === "object" ? cursors.hourly : null;
   if (hourly?.buckets) {
     for (const key of Object.keys(hourly.buckets)) {
-      if (key.startsWith("zcode|")) delete hourly.buckets[key];
+      if (!key.startsWith("zcode|")) continue;
+      if (zcodeHourIsPreWindow(zcodeHourFromMainBucketKey(key), preserveBeforeMs)) continue;
+      delete hourly.buckets[key];
     }
   }
   if (hourly?.groupQueued) {
     for (const key of Object.keys(hourly.groupQueued)) {
-      if (key.startsWith("zcode|")) delete hourly.groupQueued[key];
+      if (!key.startsWith("zcode|")) continue;
+      if (zcodeHourIsPreWindow(zcodeHourFromGroupQueuedKey(key), preserveBeforeMs)) continue;
+      delete hourly.groupQueued[key];
     }
   }
   const projectHourly = cursors.projectHourly && typeof cursors.projectHourly === "object"
@@ -4971,10 +5304,15 @@ async function repairZcodeUsageMigration({
     : null;
   if (projectHourly?.buckets) {
     for (const key of Object.keys(projectHourly.buckets)) {
-      if (key.includes("|zcode|")) delete projectHourly.buckets[key];
+      if (!key.includes("|zcode|")) continue;
+      if (zcodeHourIsPreWindow(zcodeHourFromProjectBucketKey(key), preserveBeforeMs)) continue;
+      delete projectHourly.buckets[key];
     }
   }
-  delete cursors.zcode;
+  // Keep pre-window message dedup so preserved buckets are not double-counted
+  // when legacy rows still exist in the live DB. Clear only in-window (and
+  // unattributed) cursor entries so the rescan can rebuild those hours.
+  pruneZcodeMessageCursorForRebuild(cursors, preserveBeforeMs);
 
   if (mainRepair.removed > 0) {
     await resetUploadOffsetForZcodeRepair(queueStatePath, queueStateNote);
@@ -4987,6 +5325,236 @@ async function repairZcodeUsageMigration({
     removedMain: mainRepair.removed,
     removedProject: projectRepair.removed,
     retractions: mainRepair.retractions,
+    preservedMain: mainRepair.preserved || 0,
+    preservedProject: projectRepair.preserved || 0,
+    rebuildFloorMs: preserveBeforeMs,
+  };
+  return true;
+}
+
+function zcodeRowTotals(row) {
+  return {
+    input_tokens: Number(row?.input_tokens) || 0,
+    cached_input_tokens: Number(row?.cached_input_tokens) || 0,
+    cache_creation_input_tokens: Number(row?.cache_creation_input_tokens) || 0,
+    output_tokens: Number(row?.output_tokens) || 0,
+    reasoning_output_tokens: Number(row?.reasoning_output_tokens) || 0,
+    total_tokens: Number(row?.total_tokens) || 0,
+    conversation_count: Number(row?.conversation_count) || 0,
+  };
+}
+
+function zcodeTotalsDominate(candidate, baseline) {
+  if (!candidate) return false;
+  if (!baseline) return (candidate.total_tokens || 0) > 0;
+  return (candidate.total_tokens || 0) > (baseline.total_tokens || 0);
+}
+
+async function collectZcodeQueuePeaks(filePath, { beforeMs = null } = {}) {
+  const peaks = new Map();
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return peaks;
+    throw error;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (_error) {
+      continue;
+    }
+    if (row?.source !== "zcode") continue;
+    const model = typeof row.model === "string" && row.model.trim()
+      ? row.model.trim()
+      : "unknown";
+    const hourStart = typeof row.hour_start === "string" ? row.hour_start : "";
+    if (!hourStart) continue;
+    if (beforeMs != null && !zcodeHourIsPreWindow(hourStart, beforeMs)) continue;
+    const key = `${model}|${hourStart}`;
+    const totals = zcodeRowTotals(row);
+    const prev = peaks.get(key);
+    if (!prev || zcodeTotalsDominate(totals, prev.totals)) {
+      peaks.set(key, { model, hour_start: hourStart, totals });
+    }
+  }
+  return peaks;
+}
+
+// Last-wins per key (cloud replay semantics). A historical peak of 9000 followed
+// by a repair retraction of 0 must report 0 so restore still re-appends.
+async function collectZcodeQueueLatest(filePath, { beforeMs = null } = {}) {
+  const latest = new Map();
+  let raw;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return latest;
+    throw error;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (_error) {
+      continue;
+    }
+    if (row?.source !== "zcode") continue;
+    const model = typeof row.model === "string" && row.model.trim()
+      ? row.model.trim()
+      : "unknown";
+    const hourStart = typeof row.hour_start === "string" ? row.hour_start : "";
+    if (!hourStart) continue;
+    if (beforeMs != null && !zcodeHourIsPreWindow(hourStart, beforeMs)) continue;
+    latest.set(`${model}|${hourStart}`, {
+      model,
+      hour_start: hourStart,
+      totals: zcodeRowTotals(row),
+    });
+  }
+  return latest;
+}
+
+async function listZcodeQueueBackupPaths(queuePath) {
+  if (typeof queuePath !== "string" || !queuePath) return [];
+  const dir = path.dirname(queuePath);
+  const base = path.basename(queuePath);
+  let names;
+  try {
+    names = await fs.readdir(dir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  return names
+    .filter((name) => name.startsWith(`${base}.bak.`))
+    .map((name) => path.join(dir, name))
+    .sort();
+}
+
+async function repairZcodePruneWindowRestore({
+  cursors,
+  queuePath,
+  queueStatePath,
+  dbPaths = [],
+  rebuildFloorMs: rebuildFloorMsOption = null,
+} = {}) {
+  if (!cursors || typeof cursors !== "object") return false;
+  const migrations = (cursors.migrations ||= {});
+  const prior = migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY];
+  if (isCompletedZcodeMigration(prior)) return false;
+
+  const rebuildFloorMs = Number.isFinite(rebuildFloorMsOption)
+    ? rebuildFloorMsOption
+    : resolveZcodeRebuildFloorMs(dbPaths);
+  if (!Number.isFinite(rebuildFloorMs)) {
+    migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+      skipped: true,
+      reason: "zcode_rebuild_floor_unavailable",
+      at: new Date().toISOString(),
+    };
+    return false;
+  }
+
+  const backupPaths = await listZcodeQueueBackupPaths(queuePath);
+  if (backupPaths.length === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+      skipped: true,
+      reason: "zcode_queue_backup_missing",
+      at: new Date().toISOString(),
+      rebuildFloorMs,
+    };
+    return false;
+  }
+
+  const preserveBeforeMs = zcodePreserveBeforeMsFromFloor(rebuildFloorMs);
+  const backupPeaks = new Map();
+  for (const backupPath of backupPaths) {
+    const peaks = await collectZcodeQueuePeaks(backupPath, { beforeMs: preserveBeforeMs });
+    for (const [key, peak] of peaks) {
+      const prev = backupPeaks.get(key);
+      if (!prev || zcodeTotalsDominate(peak.totals, prev.totals)) {
+        backupPeaks.set(key, peak);
+      }
+    }
+  }
+  if (backupPeaks.size === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+      appliedAt: new Date().toISOString(),
+      restored: 0,
+      rebuildFloorMs,
+      preserveBeforeMs,
+      note: "no_pre_window_peaks_in_backups",
+    };
+    return true;
+  }
+
+  const liveLatest = await collectZcodeQueueLatest(queuePath, { beforeMs: preserveBeforeMs });
+  const hourly = (cursors.hourly ||= { buckets: {}, groupQueued: {} });
+  hourly.buckets ||= {};
+  const restorations = [];
+  for (const [key, peak] of backupPeaks) {
+    const bucketKeyName = bucketKey("zcode", peak.model, peak.hour_start);
+    const live = liveLatest.get(key)?.totals || null;
+    // Compare against the latest queue emission (last-wins), not historical peaks
+    // or cursor buckets — a 9000→0 retraction must still restore.
+    if (!zcodeTotalsDominate(peak.totals, live)) {
+      const bucketTotals = hourly.buckets[bucketKeyName]?.totals
+        ? zcodeRowTotals(hourly.buckets[bucketKeyName].totals)
+        : null;
+      if (bucketTotals && zcodeTotalsDominate(peak.totals, bucketTotals)) {
+        hourly.buckets[bucketKeyName] = {
+          ...(hourly.buckets[bucketKeyName] || {}),
+          totals: { ...peak.totals },
+          hour_start: peak.hour_start,
+          source: "zcode",
+          model: peak.model,
+        };
+      }
+      continue;
+    }
+    restorations.push(peak);
+    hourly.buckets[bucketKeyName] = {
+      ...(hourly.buckets[bucketKeyName] || {}),
+      totals: { ...peak.totals },
+      hour_start: peak.hour_start,
+      source: "zcode",
+      model: peak.model,
+    };
+  }
+
+  if (restorations.length === 0) {
+    migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+      appliedAt: new Date().toISOString(),
+      restored: 0,
+      rebuildFloorMs,
+      backupsConsidered: backupPaths.length,
+      note: "backup_peaks_not_higher",
+    };
+    return true;
+  }
+
+  await backupExistingFile(queuePath);
+  const append = restorations.map((peak) => JSON.stringify({
+    source: "zcode",
+    model: peak.model,
+    hour_start: peak.hour_start,
+    ...peak.totals,
+  }));
+  await fs.appendFile(queuePath, `${append.join("\n")}\n`, "utf8");
+  await resetUploadOffsetForZcodeRepair(
+    queueStatePath,
+    "reset_after_zcode_prune_window_restore_2026_10",
+  );
+  migrations[ZCODE_PRUNE_WINDOW_RESTORE_KEY] = {
+    appliedAt: new Date().toISOString(),
+    restored: restorations.length,
+    rebuildFloorMs,
+    backupsConsidered: backupPaths.length,
   };
   return true;
 }
@@ -5644,7 +6212,23 @@ async function repairWorkbuddyContextUsage({
   for (const [key, value] of Object.entries(tmpCursors.hourly.groupQueued || {})) {
     if (key.startsWith("workbuddy|")) nextHourly.groupQueued[key] = value;
   }
-  cursors.workbuddy = tmpCursors.workbuddy || {};
+  // This migration rebuilds totals from a temp queue using empty cursors, so
+  // `tmpCursors.workbuddy` carries no project state. Replacing the whole object
+  // would drop the project cursor while leaving the published project buckets
+  // (cursors.projectHourly and the real project queue) untouched, and the next
+  // parse would re-attribute every historical session on top of them. The
+  // migration only changes totals, so keep the project cursor as it is.
+  const previousWorkbuddyState =
+    cursors.workbuddy && typeof cursors.workbuddy === "object" ? cursors.workbuddy : {};
+  cursors.workbuddy = {
+    ...(tmpCursors.workbuddy || {}),
+    ...(previousWorkbuddyState.projectFileOffsets
+      ? { projectFileOffsets: previousWorkbuddyState.projectFileOffsets }
+      : {}),
+    ...(Array.isArray(previousWorkbuddyState.projectSeenIds)
+      ? { projectSeenIds: previousWorkbuddyState.projectSeenIds }
+      : {}),
+  };
 
   let uploadState = {};
   try { uploadState = JSON.parse(await fs.readFile(queueStatePath, "utf8")); } catch (_e) {}
@@ -6229,26 +6813,56 @@ async function scanCodexUsageLineages(filePath, maxBytes = Infinity) {
     const byteLimit = Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : Infinity;
     let bytesRead = 0;
     let affected = false;
-    stream = fssync.createReadStream(filePath, { highWaterMark: 32 * 1024 });
-    for await (const record of physicalJsonlRecords(stream, {
-      maxPhysicalBytes: byteLimit,
-    })) {
-      const { line } = record;
-      bytesRead += record.physicalBytes;
-      if (bytesRead > byteLimit) return { affected: false, indeterminate: true };
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (_e) {
+    const isCompressed = typeof filePath === "string" && /\.jsonl\.zstd?$/i.test(filePath);
+    if (isCompressed) {
+      // Honor the background-sync lineage budget against compressed size so a
+      // pending repair with large archives stays bounded and returns
+      // indeterminate until a full sync can finish the scan.
+      if (!(byteLimit > 0) || before.size > byteLimit) {
         return { affected: false, indeterminate: true };
       }
-      const token = extractTokenCount(obj);
-      const info = token?.info;
-      if (!info || typeof info !== "object") continue;
-      consumeUsageDelta(state, info.last_token_usage, info.total_token_usage);
-      if (state.sawInterleaved || state.sawDivergentCumulative) {
-        affected = true;
+      const snapshot = await readCodexRolloutSnapshot(filePath);
+      if (!snapshot) return { affected: false, indeterminate: true };
+      for (const raw of snapshot.lines) {
+        const line = typeof raw === "string" ? raw : "";
+        if (!line.trim()) continue;
+        let obj;
+        try {
+          obj = JSON.parse(line);
+        } catch (_e) {
+          return { affected: false, indeterminate: true };
+        }
+        const token = extractTokenCount(obj);
+        const info = token?.info;
+        if (!info || typeof info !== "object") continue;
+        consumeUsageDelta(state, info.last_token_usage, info.total_token_usage);
+        if (state.sawInterleaved || state.sawDivergentCumulative) {
+          affected = true;
+        }
+      }
+      bytesRead = snapshot.size;
+    } else {
+      stream = fssync.createReadStream(filePath, { highWaterMark: 32 * 1024 });
+      for await (const record of physicalJsonlRecords(stream, {
+        maxPhysicalBytes: byteLimit,
+      })) {
+        const { line } = record;
+        bytesRead += record.physicalBytes;
+        if (bytesRead > byteLimit) return { affected: false, indeterminate: true };
+        if (!line.trim()) continue;
+        let obj;
+        try {
+          obj = JSON.parse(line);
+        } catch (_e) {
+          return { affected: false, indeterminate: true };
+        }
+        const token = extractTokenCount(obj);
+        const info = token?.info;
+        if (!info || typeof info !== "object") continue;
+        consumeUsageDelta(state, info.last_token_usage, info.total_token_usage);
+        if (state.sawInterleaved || state.sawDivergentCumulative) {
+          affected = true;
+        }
       }
     }
     const after = await readCodexFileSnapshot(filePath);
@@ -6353,6 +6967,23 @@ async function scanForForkedCodexRollout(rolloutFiles) {
     if (!fp || src !== "codex") continue;
     let fh = null;
     try {
+      if (typeof fp === "string" && /\.jsonl\.zstd?$/i.test(fp)) {
+        const snapshot = await readCodexRolloutSnapshot(fp);
+        if (!snapshot) {
+          indeterminate = true;
+          continue;
+        }
+        // Fork marker is in early session_meta; scan a bounded prefix of lines.
+        let head = "";
+        for (const raw of snapshot.lines) {
+          head += (typeof raw === "string" ? raw : "") + "\n";
+          if (head.length >= HEAD_BYTES) break;
+        }
+        if (head.includes('"forked_from_id"')) {
+          return { forked: true, indeterminate: false };
+        }
+        continue;
+      }
       fh = await fs.open(fp, "r");
       const buf = Buffer.alloc(HEAD_BYTES);
       const { bytesRead } = await fh.read(buf, 0, HEAD_BYTES, 0);

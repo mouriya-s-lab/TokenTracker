@@ -1,6 +1,6 @@
 {
   "name": "tokentracker-linux",
-  "version": "1.3.13",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
     "prebuild": "node scripts/sync-tauri-icon.mjs"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "^2.11.4",
     "pngjs": "^7.0.0"
   }
 }

@@ -30,7 +30,7 @@ const {
   currentCodexModel,
   snapshotCodexModelAttributionState,
 } = require("./codex-model-attribution");
-const { readCodexServiceTier, isPriorityServiceTier } = require("./codex-service-tier");
+const { readCodexServiceTier, isPriorityServiceTier, isUltrafastServiceTier } = require("./codex-service-tier");
 const {
   createUsageRecordState,
   extractTokenUsageRecord,
@@ -42,6 +42,28 @@ const {
 } = require("./codex-usage-record");
 
 const DISCOVERY_FULL_AUDIT_INTERVAL_MS = 60 * 1000;
+const CODEX_ROLLOUT_TEXT_MAX_BYTES = 256 * 1024 * 1024;
+
+async function readCodexRolloutText(filePath, { maxOutputBytes = CODEX_ROLLOUT_TEXT_MAX_BYTES } = {}) {
+  if (typeof filePath !== "string" || !/\.jsonl\.zstd?$/i.test(filePath)) {
+    return fs.readFile(filePath, "utf8");
+  }
+  // The snapshot decoder lives in rollout.js (reused by the sync parser);
+  // require lazily so this module stays loadable without pulling the whole
+  // rollout graph at import time.
+  const rollout = require("./rollout");
+  const snapshot = await rollout.readCodexRolloutSnapshot(filePath, { maxOutputBytes });
+  if (!snapshot) {
+    // Treat undecodable / vanished archives as recoverable I/O so grouped
+    // session reads (live + archive) can still use a readable sibling copy.
+    const error = new Error(`unreadable Codex archive ${filePath}`);
+    error.code = "EIO";
+    throw error;
+  }
+  // Snapshot lines keep their "\n" terminators; the tail element may be an
+  // unterminated final line — join preserves exactly that.
+  return snapshot.lines.join("\n");
+}
 const MAX_DISCOVERY_INVENTORIES = 32;
 const DISCOVERY_INVENTORIES = new Map();
 const ZONED_DAY_FORMATTERS = new Map();
@@ -143,6 +165,11 @@ function safeJsonParse(str, diagnostics = null) {
   }
 }
 
+function isRolloutCandidateFileName(name) {
+  if (typeof name !== "string") return false;
+  return name.endsWith(".jsonl") || /^rollout-.*\.jsonl\.zstd?$/.test(name);
+}
+
 function listJsonlFiles(rootDir) {
   const out = [];
   const stack = [rootDir];
@@ -160,7 +187,7 @@ function listJsonlFiles(rootDir) {
       const filePath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         stack.push(filePath);
-      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      } else if (entry.isFile() && isRolloutCandidateFileName(entry.name)) {
         out.push(filePath);
       }
     }
@@ -331,7 +358,7 @@ function discoverCodexSessionFiles(rootDirs, options = {}) {
         stack.push(filePath);
         continue;
       }
-      if (!child.isFile() || !child.name.endsWith(".jsonl") || visited.has(filePath)) continue;
+      if (!child.isFile() || !isRolloutCandidateFileName(child.name) || visited.has(filePath)) continue;
       visited.add(filePath);
       if (diagnostics) diagnostics.discovered_files += 1;
       const cached = inventory.files.get(filePath) || null;
@@ -704,16 +731,27 @@ async function parseCodexRolloutFile(filePath, {
         priority_long_context_cache_creation_input_tokens: 0,
         priority_long_context_output_tokens: 0,
         priority_long_context_reasoning_output_tokens: 0,
+        ultrafast_input_tokens: 0,
+        ultrafast_cached_input_tokens: 0,
+        ultrafast_cache_creation_input_tokens: 0,
+        ultrafast_output_tokens: 0,
+        ultrafast_reasoning_output_tokens: 0,
+        ultrafast_long_context_input_tokens: 0,
+        ultrafast_long_context_cached_input_tokens: 0,
+        ultrafast_long_context_cache_creation_input_tokens: 0,
+        ultrafast_long_context_output_tokens: 0,
+        ultrafast_long_context_reasoning_output_tokens: 0,
         usage_events: 0,
         rerouted_usage_events: 0,
         long_context_usage_events: 0,
         priority_usage_events: 0,
+        ultrafast_usage_events: 0,
         selected_models: new Set(),
         reroute_reasons: new Set(),
       };
       byModel.set(effectiveModel, row);
     }
-    const subsetKeys = Object.keys(row).filter((key) => /^(?:long_context_|priority_)|^(?:usage_events|rerouted_usage_events)$/.test(key));
+    const subsetKeys = Object.keys(row).filter((key) => /^(?:long_context_|priority_|ultrafast_)|^(?:usage_events|rerouted_usage_events)$/.test(key));
     const before = Object.fromEntries(subsetKeys.map((key) => [key, row[key]]));
     addInto(row, delta);
     row.usage_events += 1;
@@ -758,6 +796,22 @@ async function parseCodexRolloutFile(filePath, {
           delta.cache_creation_input_tokens;
         row.priority_long_context_output_tokens += delta.output_tokens;
         row.priority_long_context_reasoning_output_tokens += delta.reasoning_output_tokens;
+      }
+    }
+    if (isUltrafastServiceTier(attribution.serviceTier)) {
+      row.ultrafast_usage_events += 1;
+      row.ultrafast_input_tokens += delta.input_tokens;
+      row.ultrafast_cached_input_tokens += delta.cached_input_tokens;
+      row.ultrafast_cache_creation_input_tokens += delta.cache_creation_input_tokens;
+      row.ultrafast_output_tokens += delta.output_tokens;
+      row.ultrafast_reasoning_output_tokens += delta.reasoning_output_tokens;
+      if (isLongContext) {
+        row.ultrafast_long_context_input_tokens += delta.input_tokens;
+        row.ultrafast_long_context_cached_input_tokens += delta.cached_input_tokens;
+        row.ultrafast_long_context_cache_creation_input_tokens +=
+          delta.cache_creation_input_tokens;
+        row.ultrafast_long_context_output_tokens += delta.output_tokens;
+        row.ultrafast_long_context_reasoning_output_tokens += delta.reasoning_output_tokens;
       }
     }
     return { ...delta, ...Object.fromEntries(subsetKeys.map((key) => [key, row[key] - before[key]])),
@@ -1175,7 +1229,13 @@ async function parseCodexRolloutFile(filePath, {
       compactionResponseIds: Array.from(compactionResponseIds),
     };
     result.endOffset = readProgress.endOffset;
-    result.appendable = Boolean(contentHasher) && (
+    // Compressed snapshots are not append-only logs: endOffset stays at the
+    // pre-decode cursor (often 0) and must never be marked appendable, or the
+    // next growth would "resume" by parsing compressed bytes as JSONL.
+    const hasCompressedArchive = filePaths.some(
+      (candidate) => typeof candidate === "string" && /\.jsonl\.zstd?$/i.test(candidate),
+    );
+    result.appendable = Boolean(contentHasher) && !hasCompressedArchive && (
       readProgress.endOffset === 0 || readProgress.lastByte === 0x0a
     );
     result.contentHashState = contentHasher;
@@ -1309,6 +1369,27 @@ async function* readCodexObjectsFull(filePath, diagnostics, fileIndex, {
   readProgress = null,
   contentHasher = null,
 } = {}) {
+  // Compressed archives are immutable snapshots, not append-only logs: byte
+  // offsets are meaningless inside them, so decode the whole text and split
+  // into lines. `readProgress` stays null so callers never persist a fake
+  // byte cursor for them.
+  if (typeof filePath === "string" && /\.jsonl\.zstd?$/i.test(filePath)) {
+    const text = await readCodexRolloutText(filePath);
+    let lineIndex = 0;
+    const lines = text.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const isLast = index + 1 >= lines.length;
+      if (isLast && lines[index] === "") continue;
+      const lineBuffer = Buffer.from(lines[index], "utf8");
+      const obj = parseCodexLine(lineBuffer, diagnostics);
+      if (obj) {
+        yield { obj, fileIndex, lineIndex };
+        lineIndex += 1;
+      }
+    }
+    if (diagnostics) diagnostics.parsed_files += 1;
+    return;
+  }
   yield* readCodexObjectsIncremental(filePath, diagnostics, fileIndex, {
     startOffset,
     endOffset,
@@ -1331,6 +1412,7 @@ function isRecoverableGroupedReadError(error) {
 
 async function* iterateCodexObjects(filePaths, diagnostics, options = {}) {
   if (filePaths.length <= 1) {
+    if (!filePaths[0]) return;
     for await (const record of readCodexObjects(filePaths[0], diagnostics, 0, options)) {
       yield record.obj;
     }
@@ -1355,7 +1437,11 @@ async function* iterateCodexObjects(filePaths, diagnostics, options = {}) {
       if (!isRecoverableGroupedReadError(error)) throw error;
     }
   }
-  if (!scannedFiles) throw new Error("all grouped Codex rollout files failed during read");
+  if (!scannedFiles) {
+    const error = new Error("all grouped Codex rollout files failed during read");
+    error.code = "EIO";
+    throw error;
+  }
   records.sort((a, b) => {
     const aTimestamp = typeof a.obj?.timestamp === "string" ? a.obj.timestamp : "";
     const bTimestamp = typeof b.obj?.timestamp === "string" ? b.obj.timestamp : "";
@@ -1373,7 +1459,7 @@ async function* iterateCodexObjects(filePaths, diagnostics, options = {}) {
 
 function rolloutSessionIdFromPath(filePath) {
   const match = path.basename(String(filePath || "")).match(
-    /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
+    /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zstd?)?$/i,
   );
   return match ? match[1] : null;
 }
@@ -1404,6 +1490,7 @@ module.exports = {
   isTimestampInRequestedDayRange,
   rolloutSessionIdFromPath,
   isCodexResumeInvalidated,
+  isRecoverableGroupedReadError,
   finalizeToolRows,
   finalizeSkillRows,
   finalizeExecRows,

@@ -188,6 +188,64 @@ test("matcher: Kimi K3 aliases resolve to curated k3 rates (not the kimi-k2.5 fa
   }
 });
 
+test("matcher: Kimi K3.1 Pro / Highspeed resolve to official rates (not kimi-k3 fuzzy)", () => {
+  const curated = require("../src/lib/pricing/curated-overrides.json");
+  const litellm = {};
+  const pro = [
+    "kimi-k3.1-pro",
+    "KIMI-K3.1-PRO",
+    "k3.1-pro",
+    "k3.1pro",
+    "moonshot/kimi-k3.1-pro",
+    "openrouter/moonshotai/kimi-k3.1-pro",
+  ];
+  const highspeed = [
+    "kimi-k3.1-pro-highspeed",
+    "k3.1-pro-highspeed",
+    "k3.1pro-highspeed",
+    "moonshot/kimi-k3.1-pro-highspeed",
+  ];
+  for (const model of pro) {
+    const r = matcher.lookupPricing(model, { curated, litellm, source: "kimi" });
+    assert.equal(r.hit, true, `${model} should resolve`);
+    assert.equal(r.value.input, 2, `${model} input`);
+    assert.equal(r.value.output, 10, `${model} output`);
+    assert.equal(r.value.cache_read, 0.2, `${model} cache_read`);
+    assert.equal(r.value.cache_write, 2, `${model} cache_write`);
+    assert.notEqual(r.value.input, 3, `${model} must not inherit kimi-k3 $3 input`);
+  }
+  for (const model of highspeed) {
+    const r = matcher.lookupPricing(model, { curated, litellm, source: "kimi" });
+    assert.equal(r.hit, true, `${model} should resolve`);
+    assert.equal(r.value.input, 4, `${model} input`);
+    assert.equal(r.value.output, 20, `${model} output`);
+    assert.equal(r.value.cache_read, 0.2, `${model} cache_read`);
+    assert.equal(r.value.cache_write, 4, `${model} cache_write`);
+  }
+  // Regression: plain k3 still at k3 rates
+  const k3 = matcher.lookupPricing("kimi-k3", { curated, litellm });
+  assert.equal(k3.value.input, 3);
+  assert.equal(k3.value.output, 15);
+});
+
+test("index: Kimi K3.1 Pro and gemini-4-argon priced via public API", () => {
+  const pricing = require("../src/lib/pricing");
+  const pro = pricing.getModelPricingInfo("kimi-k3.1-pro");
+  assert.equal(pro.status, "priced");
+  assert.equal(pro.input, 2);
+  assert.equal(pro.output, 10);
+  const hs = pricing.getModelPricingInfo("kimi-k3.1-pro-highspeed");
+  assert.equal(hs.status, "priced");
+  assert.equal(hs.input, 4);
+  assert.equal(hs.output, 20);
+  // Gemini 4 Argon already curated at Google introductory list rate
+  const argon = pricing.getModelPricingInfo("gemini-4-argon");
+  assert.equal(argon.status, "priced");
+  assert.equal(argon.input, 2);
+  assert.equal(argon.output, 10);
+  assert.equal(argon.cache_read, 0.1);
+});
+
 test("matcher: lookupPricing fuzzy match restores `digit-digit` to `digit.digit` (droid GLM parity)", () => {
   // Droid dash-normalizes upstream `GLM-5.1` to `glm-5-1`, but curated keys
   // are dot-delimited. The matcher must retry a dot-restored variant of the
@@ -461,6 +519,18 @@ test("matcher: Cursor normalization preserves Grok Fast and canonicalizes Claude
   assert.equal(
     matcher.normalizeCursorModel("cursor-grok-4.5-high"),
     "cursor-grok-4.5",
+  );
+  assert.equal(
+    matcher.normalizeCursorModel("grok-4.7-high-fast"),
+    "cursor-grok-4.7-fast",
+  );
+  assert.equal(
+    matcher.normalizeCursorModel("grok-4.6-medium"),
+    "cursor-grok-4.6",
+  );
+  assert.equal(
+    matcher.normalizeCursorModel("gemini-4-argon-high"),
+    "gemini-4-argon",
   );
   assert.equal(
     matcher.normalizeCursorModel("claude-4.6-opus-medium-thinking"),
@@ -1225,6 +1295,152 @@ test("index: Cline free-suffixed models remain zero-cost", () => {
     cache_creation_input_tokens: 0,
     reasoning_output_tokens: 0,
   }), 0);
+});
+
+test("index: OpenCode -free models stay zero-cost while the paid base model is billed", () => {
+  const row = {
+    source: "opencode",
+    model: "deepseek-v4.1-flash-free",
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cached_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    reasoning_output_tokens: 0,
+  };
+  assert.equal(pricing.computeRowCost(row), 0);
+  assert.ok(pricing.computeRowCost({ ...row, model: "deepseek-v4.1-flash" }) > 0);
+});
+
+test("index: -free suffix is zero-cost for non-OpenCode sources too (issue #744)", () => {
+  for (const source of ["muse", "claude", "cursor", ""]) {
+    const info = pricing.getModelPricingInfo("minimax-m2.5-free", source ? { source } : {});
+    assert.equal(info.status, "free", `source=${source || "(none)"}`);
+    assert.equal(
+      pricing.computeRowCost({
+        source: source || "unknown",
+        model: "minimax-m2.5-free",
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+        cached_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning_output_tokens: 0,
+      }),
+      0,
+    );
+  }
+});
+
+test("index: qwen3.8-max uses Alibaba Singapore International list rates (issue #744)", () => {
+  const expected = { input: 2, output: 6, cache_read: 0.17, cache_write: 2.5 };
+  for (const model of [
+    "qwen3.8-max",
+    "QWEN3.8-MAX",
+    "qwen3-8-max",
+    "qwen3.8-max-0902",
+    "qwen3.8-max-2026-09-02",
+    "dashscope/qwen3.8-max",
+    "openrouter/qwen/qwen3.8-max",
+  ]) {
+    const rates = pricing.getModelPricing(model);
+    assert.deepEqual(
+      Object.fromEntries(Object.keys(expected).map((key) => [key, rates[key]])),
+      expected,
+      model,
+    );
+    const info = pricing.getModelPricingInfo(model);
+    assert.equal(info.status, "priced", model);
+  }
+  // Preview is a different SKU with no published Singapore International rate — stay unpriced.
+  // Cover both dotted and dash-normalized forms (exact-dot contained must not inherit Max).
+  for (const preview of [
+    "qwen3.8-max-preview",
+    "qwen3-8-max-preview",
+    "dashscope/qwen3-8-max-preview",
+    "openrouter/qwen/qwen3.8-max-preview",
+    "qwen3.8-max-0902-preview",
+    "qwen3-8-max-0902-preview",
+    "qwen3.8-max-2026-09-02-preview",
+    "qwen3-8-max-2026-09-02-preview",
+  ]) {
+    assert.equal(pricing.getModelPricingInfo(preview).status, "unpriced", preview);
+  }
+  // Dated exact entry is hit as curated:exact (not overridden by the shared-SKU regex).
+  assert.equal(
+    pricing.getModelPricingInfo("qwen3.8-max-0902").source,
+    "curated:exact",
+  );
+  // Must not inherit Flash rates (parity with edge distinct-SKU guard).
+  const flash = pricing.getModelPricing("qwen3.8-flash");
+  assert.notDeepEqual(
+    Object.fromEntries(["input", "output"].map((k) => [k, pricing.getModelPricing("qwen3.8-max")[k]])),
+    Object.fromEntries(["input", "output"].map((k) => [k, flash[k]])),
+  );
+  // Cost: 1M in + 1M out + 1M cache_read + 1M cache_write = 2+6+0.17+2.5 = 10.67
+  assert.ok(
+    Math.abs(
+      pricing.computeRowCost({
+        model: "qwen3.8-max",
+        input_tokens: 1e6,
+        output_tokens: 1e6,
+        cached_input_tokens: 1e6,
+        cache_creation_input_tokens: 1e6,
+      }) - 10.67,
+    ) < 1e-12,
+  );
+});
+
+test("index: Kimi K2.8 Preview aliases stay unpriced (do not inherit kimi-k2.5 fuzzy) (#766)", () => {
+  for (const model of ["k2.8", "kimicoding", "kimi-k2.8", "kimicoding/k2.8", "KIMICODING/K2.8"]) {
+    const info = pricing.getModelPricingInfo(model);
+    assert.equal(info.status, "unpriced", model);
+  }
+  // kimi-for-coding keeps its curated exact entry.
+  assert.equal(pricing.getModelPricingInfo("kimi-for-coding").status, "priced");
+  assert.equal(pricing.getModelPricingInfo("kimi-k2.5").status, "priced");
+});
+
+test("index: Muse *-contributor-free SKUs are free, not unpriced (issue #744)", () => {
+  for (const model of [
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+  ]) {
+    const info = pricing.getModelPricingInfo(model, { source: "muse" });
+    assert.equal(info.status, "free", model);
+    assert.equal(
+      pricing.computeRowCost({
+        source: "muse",
+        model,
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+        cached_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning_output_tokens: 0,
+      }),
+      0,
+      model,
+    );
+  }
+  // Unsuffixed contributor ids stay unpriced until we have evidence they are $0.
+  assert.equal(
+    pricing.getModelPricingInfo("muse-spark-1.3-contributor", { source: "muse" }).status,
+    "unpriced",
+  );
+});
+
+test("index: explicit curated exact still wins over -free suffix (issue #744)", () => {
+  const curated = require("../src/lib/pricing/curated-overrides.json");
+  const { lookupPricing } = require("../src/lib/pricing/matcher");
+  const fakeCurated = {
+    ...curated,
+    exact: {
+      ...curated.exact,
+      "synthetic-paid-free": { input: 9, output: 9, cache_read: 1, cache_write: 2 },
+    },
+  };
+  const hit = lookupPricing("synthetic-paid-free", { curated: fakeCurated, litellm: {}, source: "muse" });
+  assert.equal(hit.hit, true);
+  assert.equal(hit.source, "curated:exact");
+  assert.equal(hit.value.input, 9);
 });
 
 test("index: computeRowCost ignores reported costs from non-authoritative sources", () => {

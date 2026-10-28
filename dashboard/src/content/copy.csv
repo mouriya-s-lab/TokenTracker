@@ -285,6 +285,7 @@ limits.zcode.grant_amount,dashboard,LimitsPage,UsageLimitsPanel,detail,"{{remain
 limits.zcode.reset_bank.title,dashboard,LimitsPage,UsageLimitsPanel,label,"Quota resets",,active
 limits.zcode.reset_bank.count,dashboard,LimitsPage,UsageLimitsPanel,detail,"{{count}} available",,active
 limits.zcode.reset_bank.earliest,dashboard,LimitsPage,UsageLimitsPanel,detail,"Earliest expiry: {{time}}",,active
+limits.zcode.reset_bank.batch,dashboard,LimitsPage,UsageLimitsPanel,detail,"{{time}} ×{{count}}",,active
 leaderboard.range,dashboard,LeaderboardPage,LeaderboardPage,range,"UTC {{period}} · {{from}} – {{to}}",,active
 leaderboard.range_loading,dashboard,LeaderboardPage,LeaderboardPage,range_loading,"UTC {{period}} · …",,active
 leaderboard.range.total,dashboard,LeaderboardPage,LeaderboardPage,range_total,"All time",,active
@@ -765,6 +766,13 @@ limits.label.grok_month,ui,LimitsPage,UsageLimitsPanel,grok_month,"Month",,activ
 limits.label.grok_week,ui,LimitsPage,UsageLimitsPanel,grok_week,"Weekly",,active
 limits.label.grok_day,ui,LimitsPage,UsageLimitsPanel,grok_day,"Daily",,active
 limits.label.grok_ondemand,ui,LimitsPage,UsageLimitsPanel,grok_ondemand,"On-demand",,active
+limits.label.grok_build,ui,LimitsPage,UsageLimitsPanel,grok_build,"Grok Build",,active
+limits.label.grok_bot,ui,LimitsPage,UsageLimitsPanel,grok_bot,"Grok Bot",,active
+limits.label.grok_chat,ui,LimitsPage,UsageLimitsPanel,grok_chat,"Chat",,active
+limits.label.grok_imagine,ui,LimitsPage,UsageLimitsPanel,grok_imagine,"Imagine",,active
+limits.label.grok_voice,ui,LimitsPage,UsageLimitsPanel,grok_voice,"Voice",,active
+limits.label.grok_cursor,ui,LimitsPage,UsageLimitsPanel,grok_cursor,"Cursor",,active
+limits.grok.shares_are_used,ui,LimitsPage,UsageLimitsPanel,shares_are_used,"Product shares are portions of the amount used.",,active
 limits.provider.claude,ui,LimitsPage,UsageLimitsPanel,provider_claude,"Claude",,active
 limits.provider.codex,ui,LimitsPage,UsageLimitsPanel,provider_codex,"Codex",,active
 limits.provider.cursor,ui,LimitsPage,UsageLimitsPanel,provider_cursor,"Cursor",,active
@@ -1271,10 +1279,16 @@ limits.opencodeGo.setupHint.subtitle,ui,LimitsPage,UsageLimitsPanel,opencode_go_
 limits.opencodeGo.setupHint.step1,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_step1,"Sign in at opencode.ai and subscribe to Go.",,active
 limits.opencodeGo.setupHint.cta,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_cta,"Open opencode.ai",,active
 limits.opencodeGo.setupHint.step2,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_step2,"Create and copy an API key in the console.",,active
-limits.opencodeGo.setupHint.step3,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_step3,"Run this command, paste your API key (input stays invisible), then restart TokenTracker:",,active
-limits.opencodeGo.setupHint.note_app,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_note_app,"macOS app: use the launchctl setenv line, then reopen the app.",,active
-limits.opencodeGo.setupHint.copy,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_copy,"Copy",,active
-limits.opencodeGo.setupHint.copied,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_copied,"Copied",,active
+limits.opencodeGo.setupHint.step3,ui,LimitsPage,UsageLimitsPanel,opencode_go_hint_step3,"Paste your API key below. TokenTracker stores it on this device and uses it only to read your Go usage.",,active
+limits.apiKey.placeholder,ui,LimitsPage,UsageLimitsPanel,api_key_placeholder,"Paste API key",,active
+limits.apiKey.save,ui,LimitsPage,UsageLimitsPanel,api_key_save,"Save key",,active
+limits.apiKey.saving,ui,LimitsPage,UsageLimitsPanel,api_key_saving,"Saving...",,active
+limits.apiKey.saved,ui,LimitsPage,UsageLimitsPanel,api_key_saved,"Saved",,active
+limits.apiKey.save_failed,ui,LimitsPage,UsageLimitsPanel,api_key_save_failed,"Could not save the key. Check the key and try again.",,active
+limits.apiKey.local_note,ui,LimitsPage,UsageLimitsPanel,api_key_local_note,"Stored only on this device (owner-only permissions). TokenTracker sends it only to the provider's usage API.",,active
+limits.apiKey.env_note,ui,LimitsPage,UsageLimitsPanel,api_key_env_note,"Using {{env}} from the environment. Save a key here so you can stop exporting it globally.",,active
+limits.apiKey.env_unset_command,ui,LimitsPage,UsageLimitsPanel,api_key_env_unset_command,"launchctl unsetenv {{env}}",,active
+limits.apiKey.env_unset_note,ui,LimitsPage,UsageLimitsPanel,api_key_env_unset_note,"Then reopen TokenTracker.",,active
 settings.menubar.updates.checking,ui,SettingsPage,NativeAppFooter,updates_checking,"Checking...","正在检测...",active
 settings.menubar.updates.upToDate,ui,SettingsPage,NativeAppFooter,updates_uptodate,"You are up to date!","已是最新版本",active
 settings.menubar.updates.failed,ui,SettingsPage,NativeAppFooter,updates_failed,"Failed to check for updates. Please try again.","检查更新失败，请重试",active
@@ -1406,6 +1420,7 @@ sessions.card.model,dashboard,DashboardPage,SessionInsightsCard,model,"Model",,a
 sessions.card.edit_session_value,dashboard,DashboardPage,SessionInsightsCard,edit_session_value,"{{edits}} / {{sessions}}",,active
 sessions.card.edit_turn_count,dashboard,DashboardPage,SessionInsightsCard,edit_turn_count,"{{count}} edit turns",,active
 sessions.card.tokens_edit,dashboard,DashboardPage,SessionInsightsCard,tokens_edit,"Tokens / edit",,active
+sessions.card.scroll,dashboard,DashboardPage,SessionInsightsCard,aria_label,"Scroll session efficiency columns horizontally",,active
 sessions.card.sample,dashboard,DashboardPage,SessionInsightsCard,sample,"{{sessions}} sessions · {{edits}} edit turns",,active
 sessions.card.methodology_label,dashboard,DashboardPage,SessionInsightsCard,methodology_label,"How measured",,active
 sessions.card.methodology,dashboard,DashboardPage,SessionInsightsCard,methodology,"Edit = a user turn containing an observed edit tool. First-pass = exactly one edit turn with no repeated request.",,active
@@ -1622,22 +1637,16 @@ limits.label.command_code_weekly,ui,LimitsPage,UsageLimitsPanel,command_code_wee
 limits.commandCode.setupHint.title,ui,LimitsPage,UsageLimitsPanel,command_code_hint_title,"Connect Command Code",,active
 limits.commandCode.setupHint.subtitle,ui,LimitsPage,UsageLimitsPanel,command_code_hint_subtitle,"Reads your subscription usage from the official Command Code API with the same login as the cmd CLI.",,active
 limits.commandCode.setupHint.step1,ui,LimitsPage,UsageLimitsPanel,command_code_hint_step1,"Option 1 — sign in with the Command Code CLI (recommended): run the login command below. TokenTracker reuses that login with no restart.",,active
-limits.commandCode.setupHint.step2,ui,LimitsPage,UsageLimitsPanel,command_code_hint_step2,"Option 2 — use an API key instead: run this command, paste your key (input stays invisible), then restart TokenTracker:",,active
-limits.commandCode.setupHint.copy,ui,LimitsPage,UsageLimitsPanel,command_code_hint_copy,"Copy",,active
-limits.commandCode.setupHint.copied,ui,LimitsPage,UsageLimitsPanel,command_code_hint_copied,"Copied",,active
-limits.commandCode.setupHint.note_app,ui,LimitsPage,UsageLimitsPanel,command_code_hint_note_app,"macOS app: use the launchctl setenv line, then reopen the app.",,active
+limits.commandCode.setupHint.step2,ui,LimitsPage,UsageLimitsPanel,command_code_hint_step2,"Or save an API key here — TokenTracker uses it only for usage requests.",,active
 limits.commandCode.setupHint.snippet_login,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_login,"cmd login",,active
-limits.commandCode.setupHint.snippet_read,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_read,"read -r -s COMMAND_CODE_API_KEY",,active
-limits.commandCode.setupHint.snippet_export,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_export,"export COMMAND_CODE_API_KEY",,active
-limits.commandCode.setupHint.snippet_setenv,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_setenv,"launchctl setenv COMMAND_CODE_API_KEY ""$COMMAND_CODE_API_KEY""",,active
 limits.commandCode.setupHint.snippet_login_windows,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_login_windows,"cmdc auth login",,active
-limits.commandCode.setupHint.snippet_env_windows,ui,LimitsPage,UsageLimitsPanel,command_code_hint_snippet_env_windows,"$token = Read-Host -AsSecureString\n$env:COMMAND_CODE_API_KEY = [System.Net.NetworkCredential]::new('', $token).Password\n[Environment]::SetEnvironmentVariable('COMMAND_CODE_API_KEY', $env:COMMAND_CODE_API_KEY, 'User')",,active
-limits.commandCode.setupHint.note_windows,ui,LimitsPage,UsageLimitsPanel,command_code_hint_note_windows,"Windows: run in PowerShell, then restart TokenTracker.",,active
-limits.commandCode.setupHint.note_linux,ui,LimitsPage,UsageLimitsPanel,command_code_hint_note_linux,"Linux: start TokenTracker from this terminal to inherit the environment variable.",,active
-landing.discovery.tracked_usage,landing,LandingPage,index.html,tracked_usage,"Token Tracker tracks input, output, cached, and cache-creation tokens per model, project, and time window. It also detects usage limits for 17 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, Qoder CN, Command Code, and Devin.",Build-time static discovery copy,active
-landing.discovery.limits_summary,landing,LandingPage,index.html,limits_summary,"live quota and subscription status for 17 providers, with last-good caching for local providers such as Antigravity and Qoder.",Build-time static discovery copy,active
-landing.discovery.faq_usage,landing,LandingPage,index.html,faq_usage,"Input, output, cached, and cache-creation tokens per model, project, and time window. It also surfaces usage limits for 17 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, Qoder CN, Command Code, and Devin.",Build-time static discovery copy,active
+landing.discovery.tracked_usage,landing,LandingPage,index.html,tracked_usage,"Token Tracker tracks input, output, cached, and cache-creation tokens per model, project, and time window. It also detects usage limits for 18 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, Qoder CN, Command Code, Devin, and WorkBuddy.",Build-time static discovery copy,active
+landing.discovery.limits_summary,landing,LandingPage,index.html,limits_summary,"live quota and subscription status for 18 providers, with last-good caching for local providers such as Antigravity and Qoder.",Build-time static discovery copy,active
+landing.discovery.faq_usage,landing,LandingPage,index.html,faq_usage,"Input, output, cached, and cache-creation tokens per model, project, and time window. It also surfaces usage limits for 18 providers, including Claude, Codex, Cursor, Gemini, Antigravity, Qoder, Qoder CN, Command Code, Devin, and WorkBuddy.",Build-time static discovery copy,active
 limits.provider.devin,ui,LimitsPage,UsageLimitsPanel,provider_devin,"Devin",,active
+limits.provider.workbuddy,ui,LimitsPage,UsageLimitsPanel,provider_workbuddy,"WorkBuddy",,active
+limits.provider.workbuddy_ai,ui,LimitsPage,UsageLimitsPanel,provider_workbuddy_ai,"WorkBuddy AI",,active
+limits.label.workbuddy_plan,ui,LimitsPage,UsageLimitsPanel,workbuddy_plan,"Plan",,active
 limits.label.devin_daily,ui,LimitsPage,UsageLimitsPanel,devin_daily,"Daily",,active
 limits.label.devin_weekly,ui,LimitsPage,UsageLimitsPanel,devin_weekly,"Weekly",,active
 limits.devin.setupHint.title,ui,LimitsPage,UsageLimitsPanel,devin_hint_title,"Connect Devin",,active
@@ -2087,3 +2096,51 @@ cloud.free.device_scope,cloud,CloudPage,CloudPage,text,"Usage statistics for thi
 cloud.plan.includes_local,cloud,CloudPage,CloudPage,text,"All free local features included",,active
 cloud.plan.device_sync,cloud,CloudPage,CloudPage,text,"Unlimited devices · cross-device usage sync",,active
 cloud.plan.device_fair_use,cloud,CloudPage,CloudPage,text,"Unlimited devices for everyday personal use, with no per-device charges. Bulk or abnormal device connections may trigger sync protection.",,active
+limits.label.qoder_cn_addon_credits,ui,LimitsPage,UsageLimitsPanel,qoder_cn_addon_credits,Add-on Credits,,active
+cloud.rebuild.action,cloud,SettingsPage,CloudRebuildControl,action,Rebuild this device's cloud data,,active
+cloud.rebuild.title,cloud,SettingsPage,CloudRebuildControl,title,Rebuild cloud data?,,active
+cloud.rebuild.description,cloud,SettingsPage,CloudRebuildControl,description,"This removes this device's cloud usage and uploads its current local history again. Cloud-only history from this device will be lost. Local data, other devices and account-shared usage are kept.",,active
+cloud.rebuild.pending,cloud,SettingsPage,CloudRebuildControl,pending,Rebuilding. Remaining history will continue uploading during sync.,,active
+cloud.rebuild.complete,cloud,SettingsPage,CloudRebuildControl,complete,This device's cloud data has been rebuilt.,,active
+cloud.rebuild.error,cloud,SettingsPage,CloudRebuildControl,error,Rebuild did not finish. Retry to continue the same operation. Local data is unchanged.,,active
+cloud.rebuild.busy,cloud,SettingsPage,CloudRebuildControl,busy,"Sync is running. Wait for it to finish, then retry.",,active
+usage.overview.kiro_notice_title,dashboard,DashboardPage,UsageOverview,kiro_notice_title,CLI token estimates,,active
+usage.overview.kiro_notice_body,dashboard,DashboardPage,UsageOverview,kiro_notice_body,"When Kiro CLI does not report token counts, tokens are estimated from new user messages, tool outputs and assistant text at ~4 characters/token. Re-sent history, system context and cache usage are not measured. Dollar amounts use model rates and do not represent Kiro credit charges.",,active
+settings.local_data.title,settings,SettingsPage,LocalDataSection,title,Local data,,active
+settings.local_data.scope,settings,SettingsPage,LocalDataSection,scope,"Device usage only; excludes account-level usage, projects and sessions.",,active
+settings.local_data.export,settings,SettingsPage,LocalDataSection,export,Export this device,,active
+settings.local_data.import,settings,SettingsPage,LocalDataSection,import,Import another device,,active
+settings.local_data.choose,settings,SettingsPage,LocalDataSection,choose,Choose file,,active
+settings.local_data.preview,settings,SettingsPage,LocalDataSection,preview,Import preview,,active
+settings.local_data.snapshot_time,settings,SettingsPage,LocalDataSection,snapshot_time,Snapshot exported: {{time}},,active
+settings.local_data.change,settings,SettingsPage,LocalDataSection,change,Device usage: {{before}} → {{after}} tokens,,active
+settings.local_data.confirm,settings,SettingsPage,LocalDataSection,confirm,Confirm merge,,active
+settings.local_data.cancel,settings,SettingsPage,LocalDataSection,cancel,Cancel,,active
+settings.local_data.sources,settings,SettingsPage,LocalDataSection,sources,Imported devices,,active
+settings.local_data.empty,settings,SettingsPage,LocalDataSection,empty,No imported devices.,,active
+settings.local_data.unavailable,settings,SettingsPage,LocalDataSection,unavailable,"Couldn't load imported devices. Export and import need the local TokenTracker app.",,active
+settings.local_data.remove,settings,SettingsPage,LocalDataSection,remove,Remove source,,active
+settings.local_data.confirm_remove,settings,SettingsPage,LocalDataSection,confirm_remove,Confirm removal,,active
+settings.local_data.removed,settings,SettingsPage,LocalDataSection,removed,Imported usage removed. This device’s original history is unchanged.,,active
+settings.local_data.imported,settings,SettingsPage,LocalDataSection,imported,Usage merged. Find the device in the existing dashboard device filter.,,active
+settings.local_data.imported_label,settings,SettingsPage,LocalDataSection,imported_label,Imported,,active
+settings.local_data.unchanged,settings,SettingsPage,LocalDataSection,unchanged,This snapshot is already imported. No changes are needed.,,active
+settings.local_data.outdated,settings,SettingsPage,LocalDataSection,outdated,A newer snapshot is already imported. This older file will not replace it.,,active
+settings.local_data.saved,settings,SettingsPage,LocalDataSection,saved,Saved to Downloads: {{filename}},,active
+settings.local_data.download_started,settings,SettingsPage,LocalDataSection,download_started,Download started. Check your browser’s downloads to confirm it was saved.,,active
+settings.local_data.error.invalid_snapshot,settings,SettingsPage,LocalDataSection,invalid_snapshot,"Unsupported, damaged or oversized file (maximum 5 MB).",,active
+settings.local_data.error.self_import,settings,SettingsPage,LocalDataSection,self_import,This file belongs to this device. It cannot be imported here.,,active
+settings.local_data.error.snapshot_conflict,settings,SettingsPage,LocalDataSection,snapshot_conflict,The snapshot version conflicts with an existing source. Check the source device.,,active
+settings.local_data.error.preview_changed,settings,SettingsPage,LocalDataSection,preview_changed,Usage changed after the preview. Choose the file again to refresh it.,,active
+settings.local_data.error.transfer_busy,settings,SettingsPage,LocalDataSection,transfer_busy,A sync or transfer is running. Try again shortly.,,active
+settings.local_data.error.legacy_imports,settings,SettingsPage,LocalDataSection,legacy_imports,Legacy merged data was found. It needs a separate migration before transferring.,,active
+settings.local_data.error.invalid_queue,settings,SettingsPage,LocalDataSection,invalid_queue,Local history could not be read completely. Nothing was imported.,,active
+settings.local_data.error.invalid_state,settings,SettingsPage,LocalDataSection,invalid_state,The local import ledger is unreadable. Keep the files and check them before retrying.,,active
+settings.local_data.error.identity_unavailable,settings,SettingsPage,LocalDataSection,identity_unavailable,This device’s identity could not be saved.,,active
+settings.local_data.error.too_many_devices,settings,SettingsPage,LocalDataSection,too_many_devices,The imported data limit has been reached. Remove an unused source first.,,active
+settings.local_data.error.unknown_device,settings,SettingsPage,LocalDataSection,unknown_device,This imported source is no longer available.,,active
+settings.local_data.error.transfer_failed,settings,SettingsPage,LocalDataSection,transfer_failed,"Transfer failed. Check the file and local app, then try again.",,active
+settings.local_data.local_history_only,dashboard,DashboardPage,LocalDataSection,local_history_only,"Offline snapshots omit session records. Select this device for context breakdown; project, session and outcome analyses always use this device's records.",,active
+leaderboard.profile_modal.window.lifetime,dashboard,LeaderboardProfileModal,StatCards,lifetime,"Totals: all time. Active days, daily average and breakdowns: {{from}} to {{to}}.",,active
+leaderboard.profile_modal.window.period,dashboard,LeaderboardProfileModal,StatCards,period,Stats: {{from}} to {{to}}.,,active
+leaderboard.profile_modal.window.average,dashboard,LeaderboardProfileModal,StatCards,average,"Window cost divided by {{days}} calendar days, including days without usage.",,active

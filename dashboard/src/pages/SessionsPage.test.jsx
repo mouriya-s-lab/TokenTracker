@@ -193,6 +193,16 @@ const makeThreadSession = (overrides) => ({
 });
 
 describe("SessionsPage", () => {
+  it("shows a structural skeleton while the initial sessions request is pending", () => {
+    getSessions.mockReturnValue(new Promise(() => {}));
+    render(<SessionsPage />);
+
+    expect(screen.getByTestId("sessions-skeleton")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("status")).toHaveTextContent("Loading sessions…");
+    expect(screen.queryByText("0 of 0")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Processed locally/)).not.toBeInTheDocument();
+  });
+
   it("shows a reported zero first-response wait as a measured sample", async () => {
     const row = makeThreadSession({ title: "Instant response", performance: {
       estimated_request_count: 0, estimated_tokens_per_second: null,
@@ -262,6 +272,61 @@ describe("SessionsPage", () => {
     expect(screen.getByText("Fix authentication flow")).toBeInTheDocument();
     expect(screen.queryByText("Review release")).not.toBeInTheDocument();
     expect(screen.queryByText("Debug local proxy")).not.toBeInTheDocument();
+  });
+
+  it("filters Kimi sessions from the source picker and URL", async () => {
+    const kimi = { ...zcodeRow, session_hash: "kimi-row", source: "kimi", title: "Kimi session", model: "k3-256k" };
+    getSessions.mockResolvedValue({ ...response, sessions: [...response.sessions, kimi] });
+    window.history.replaceState(null, "", "/sessions?source=kimi");
+    render(<SessionsPage />);
+    expect(await screen.findByText("Kimi session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
+    await chooseSelect("Filter by session source", "All tools");
+    expect(screen.getByText("Review release")).toBeInTheDocument();
+    await chooseSelect("Filter by session source", "Kimi Code");
+    expect(screen.getByText("Kimi session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
+  });
+
+
+  it("filters oh-my-pi sessions from the source picker and URL", async () => {
+    const omp = {
+      ...zcodeRow,
+      session_hash: "omp-row",
+      source: "omp",
+      title: "OMP session",
+      model: "claude-sonnet-4-5",
+      resume_command: "omp --resume 019c625b-b900-7000-8000-000000000001",
+    };
+    getSessions.mockResolvedValue({ ...response, sessions: [...response.sessions, omp] });
+    window.history.replaceState(null, "", "/sessions?source=omp");
+    render(<SessionsPage />);
+    expect(await screen.findByText("OMP session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
+    await chooseSelect("Filter by session source", "All tools");
+    expect(screen.getByText("Review release")).toBeInTheDocument();
+    await chooseSelect("Filter by session source", "oh-my-pi");
+    expect(screen.getByText("OMP session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
+  });
+  it("filters DeepSeek Harness sessions from the source picker and URL", async () => {
+    const dsh = {
+      ...zcodeRow,
+      session_hash: "dsh-row",
+      source: "dsh",
+      title: "DSH session",
+      model: "deepseek-v4-pro",
+    };
+    getSessions.mockResolvedValue({ ...response, sessions: [...response.sessions, dsh] });
+    window.history.replaceState(null, "", "/sessions?source=dsh");
+    render(<SessionsPage />);
+    expect(await screen.findByText("DSH session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
+    await chooseSelect("Filter by session source", "All tools");
+    expect(screen.getByText("Review release")).toBeInTheDocument();
+    await chooseSelect("Filter by session source", "DeepSeek Harness");
+    expect(screen.getByText("DSH session")).toBeInTheDocument();
+    expect(screen.queryByText("Review release")).not.toBeInTheDocument();
   });
 
   it("renders and searches every observed model in a mixed Codex session", async () => {

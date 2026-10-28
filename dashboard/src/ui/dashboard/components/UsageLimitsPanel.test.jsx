@@ -1,9 +1,14 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copy, setCopyLocale } from "../../../lib/copy";
 import { DE_LOCALE, EN_LOCALE, JA_LOCALE, KO_LOCALE, ZH_CN_LOCALE, ZH_TW_LOCALE } from "../../../lib/locale";
+import { saveProviderApiKey } from "../../../lib/api";
 import { UsageLimitsPanel } from "./UsageLimitsPanel.jsx";
+
+vi.mock("../../../lib/api", () => ({
+  saveProviderApiKey: vi.fn(),
+}));
 
 function formatExpiry(iso) {
   return new Intl.DateTimeFormat(EN_LOCALE, {
@@ -33,6 +38,12 @@ beforeEach(() => {
     font: "",
     measureText: (text) => ({ width: String(text).length * 6 }),
   });
+  vi.mocked(saveProviderApiKey).mockReset();
+  vi.mocked(saveProviderApiKey).mockResolvedValue({
+    ok: true,
+    configured: true,
+    source: "stored",
+  });
 });
 
 afterEach(() => {
@@ -44,6 +55,30 @@ afterEach(() => {
 describe("UsageLimitsPanel", () => {
   afterEach(() => {
     setCopyLocale(EN_LOCALE);
+  });
+
+  it("shows one WorkBuddy row with exact credit amounts on hover and keyboard expansion in Chinese", async () => {
+    setCopyLocale(ZH_CN_LOCALE);
+    render(<UsageLimitsPanel order={["workbuddy", "workbuddyAi"]}
+      displayMode="remaining"
+      workbuddy={{ configured: true, plan_label: "Free", primary_window: {
+        used_percent: 50.586, used_credits: 252.92999996, limit_credits: 500, remaining_credits: 247.07000004,
+      } }}
+    />);
+    expect(screen.getByRole("button", { name: /^WorkBuddy Free/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^WorkBuddy/ })).toHaveLength(1);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("已用 252.93 / 500 点额度 · 剩余 247.07");
+    expect(screen.getByText("49%")).toBeInTheDocument();
+    expect(screen.queryByText("WorkBuddy AI")).not.toBeInTheDocument();
+    expect(screen.queryByText(/体验版/)).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: /^WorkBuddy Free/ }), { key: "Enter" });
+    await waitFor(() => expect(screen.getByText("已用 252.93 / 500 点额度 · 剩余 247.07")).toBeVisible());
+  });
+
+  it("keeps the international English plan name in the single WorkBuddy row", () => {
+    render(<UsageLimitsPanel workbuddy={{ configured: true, plan_label: "Pro-Trial", primary_window: { used_percent: 20 } }} />);
+    expect(screen.getByRole("button", { name: /^WorkBuddy Pro-Trial/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^WorkBuddy/ })).toHaveLength(1);
   });
 
   it("keeps Start grants collapsed inside the Pro row and expands them independently", () => {
@@ -106,7 +141,13 @@ describe("UsageLimitsPanel", () => {
         weekly: [{ expires_at: "2030-10-20T09:00:00Z" }],
       },
     }} />);
+    // Collapsed: the header shows only the total live-card badge.
     expect(screen.getByText(copy("limits.zcode.reset_bank.title"))).toBeInTheDocument();
+    expect(screen.getByText(copy("limits.zcode.reset_bank.count", { count: 3 }))).toBeInTheDocument();
+    expect(screen.queryByText(copy("limits.zcode.reset_bank.count", { count: 2 }))).not.toBeInTheDocument();
+
+    // Expanding reveals the per-group counts and earliest expiries.
+    fireEvent.click(screen.getByText(copy("limits.zcode.reset_bank.title")));
     expect(screen.getByText(copy("limits.zcode.reset_bank.count", { count: 2 }))).toBeInTheDocument();
     expect(screen.getByText(copy("limits.zcode.reset_bank.count", { count: 1 }))).toBeInTheDocument();
     expect(screen.getByText(copy("limits.zcode.reset_bank.earliest", {
@@ -118,6 +159,47 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText("2%")).toBeInTheDocument();
   });
 
+  it("clips reset countdown bars at the fixed 5h and weekly scales", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-28T00:00:00.000Z"));
+    render(<UsageLimitsPanel order={["zcode"]} zcode={{
+      configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+      primary_window: { used_percent: 2 },
+      reset_credits: {
+        // 10 days out: beyond the fixed 5h scale, so the fill clips at 100%.
+        five_hour: [{ expires_at: "2026-11-07T00:00:00Z" }],
+        // 3 of 7 days left: a fractional fill.
+        weekly: [{ expires_at: "2026-10-31T00:00:00Z" }],
+      },
+    }} />);
+    fireEvent.click(screen.getByText(copy("limits.zcode.reset_bank.title")));
+    const section = screen.getByText(copy("limits.zcode.reset_bank.title")).closest("div");
+    const fiveRow = within(section).getByText(copy("limits.label.zcode_5h")).closest("div");
+    expect(fiveRow.querySelector("div[style]").style.width).toBe("100%");
+    const weeklyRow = within(section).getByText(copy("limits.label.zcode_weekly")).closest("div");
+    expect(weeklyRow.querySelector("div[style]").style.width).toContain("42.8571");
+  });
+
+  it("batches same-instant reset cards into one time-by-count tooltip entry", () => {
+    render(<UsageLimitsPanel order={["zcode"]} zcode={{
+      configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+      primary_window: { used_percent: 2 },
+      reset_credits: {
+        five_hour: [
+          { expires_at: "2030-10-19T10:00:00Z" }, { expires_at: "2030-10-19T10:00:00Z" },
+          { expires_at: "2030-10-18T10:00:00Z" },
+        ],
+      },
+    }} />);
+    fireEvent.click(screen.getByText(copy("limits.zcode.reset_bank.title")));
+    const batchedTitle = `${formatExpiry("2030-10-18T10:00:00Z")}\n${formatExpiry("2030-10-19T10:00:00Z")} ×2`;
+    // Both the bar track and the earliest-expiry label carry the batched tooltip.
+    // The default title matcher normalizes the attribute's newline away but not
+    // the query string, so match on the raw attribute to keep asserting the
+    // newline separator between batches.
+    expect(screen.getAllByTitle(batchedTitle, { normalizer: (text) => text })).toHaveLength(2);
+  });
+
   it("keeps reset inventory failures separate from normal Pro quota bars", () => {
     render(<UsageLimitsPanel order={["zcode"]} zcode={{
       configured: true, plan_label: "Pro", plan_kind: "coding-plan",
@@ -125,8 +207,14 @@ describe("UsageLimitsPanel", () => {
       reset_credits: { error: "Reset status unavailable" },
     }} />);
     expect(screen.getByText("2%")).toBeInTheDocument();
+    // The failure stays visible even while the section is collapsed.
     expect(screen.getByText(/Reset status unavailable/)).toBeInTheDocument();
     expect(screen.queryByText(copy("limits.zcode.reset_bank.count", { count: 0 }))).not.toBeInTheDocument();
+    // Expanding keeps showing the failure instead of empty group rows.
+    fireEvent.click(screen.getByText(copy("limits.zcode.reset_bank.title")));
+    expect(screen.getByText(/Reset status unavailable/)).toBeInTheDocument();
+    const section = screen.getByText(copy("limits.zcode.reset_bank.title")).closest("div");
+    expect(within(section).queryByText(copy("limits.label.zcode_5h"))).not.toBeInTheDocument();
   });
 
   it("shows provider status rows instead of hiding configured providers with errors", () => {
@@ -193,7 +281,6 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText("5h")).toBeInTheDocument();
     expect(screen.getByText("Total")).toBeInTheDocument();
     expect(screen.getByText("Parallel: 20")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /Usage Limits\s*·\s*Used/ })).toBeInTheDocument();
     expect(screen.getByText("64%")).toBeInTheDocument();
     expect(screen.getByText("4%")).toBeInTheDocument();
     expect(screen.getByText("1%")).toBeInTheDocument();
@@ -280,34 +367,54 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText("OpenCode Go")).toBeInTheDocument();
     expect(screen.getByText("Not connected")).toBeInTheDocument();
 
-    // Setup hint teaches the official API key flow (follow-up to the closed
-    // PR about OpenCode Go direct fill).
+    // Setup hint teaches the official API key flow and saves the key in-app,
+    // never in the machine-wide launch environment.
     expect(screen.getByText("Connect OpenCode Go")).toBeInTheDocument();
     expect(screen.getByText(/Sign in at opencode.ai and subscribe to Go\./)).toBeInTheDocument();
     expect(screen.getByText(/Create and copy an API key in the console\./)).toBeInTheDocument();
-    expect(screen.getByText(/Run this command, paste your API key \(input stays invisible\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Paste your API key below\./)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Paste API key")).toBeInTheDocument();
+    expect(screen.queryByText(/launchctl/)).not.toBeInTheDocument();
   });
 
-  it("copies an API-key setup snippet without sending the key anywhere", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+  it("saves an OpenCode Go key from the panel and refreshes the limits", async () => {
+    const onProviderKeySaved = vi.fn();
+    render(
+      <UsageLimitsPanel
+        opencodeGo={{ configured: false }}
+        order={["opencodeGo"]}
+        onProviderKeySaved={onProviderKeySaved}
+      />,
+    );
 
-    render(<UsageLimitsPanel opencodeGo={{ configured: false }} order={["opencodeGo"]} />);
-
-    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await fireEvent.change(screen.getByPlaceholderText("Paste API key"), {
+      target: { value: "  test-key-123  " },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    });
 
     await vi.waitFor(() => {
-      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(saveProviderApiKey).toHaveBeenCalledWith("opencode-go", "test-key-123");
     });
-    const snippet = writeText.mock.calls[0][0];
-    // The snippet reads the key interactively (`read -r -s`) so it never lands
-    // in shell history, then exports it for both the shell profile path and
-    // the macOS app (launchctl) path. It is a template only: no real key.
-    expect(snippet).toContain("read -r -s OPENCODE_GO_API_KEY");
-    expect(snippet).toContain("export OPENCODE_GO_API_KEY");
-    expect(snippet).toContain('launchctl setenv OPENCODE_GO_API_KEY "$OPENCODE_GO_API_KEY"');
-    expect(snippet).not.toMatch(/sk-/);
-    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+    expect(onProviderKeySaved).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+  });
+
+  it("keeps the entered key and shows an error when saving fails", async () => {
+    vi.mocked(saveProviderApiKey).mockRejectedValueOnce(new Error("HTTP 500"));
+    render(<UsageLimitsPanel opencodeGo={{ configured: false }} order={["opencodeGo"]} />);
+
+    const input = screen.getByPlaceholderText("Paste API key");
+    await fireEvent.change(input, { target: { value: "test-key-123" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    });
+
+    expect(
+      await screen.findByText("Could not save the key. Check the key and try again."),
+    ).toBeInTheDocument();
+    expect(input).toHaveValue("test-key-123");
   });
 
   it("renders Command Code 5h / Weekly windows with the plan tier", () => {
@@ -346,50 +453,60 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText("Not connected")).toBeInTheDocument();
     expect(screen.getByText("Connect Command Code")).toBeInTheDocument();
     expect(screen.getByText("cmd login")).toBeInTheDocument();
-    expect(screen.getByText(/COMMAND_CODE_API_KEY/)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Paste API key")).toBeInTheDocument();
+    expect(screen.queryByText(/launchctl/)).not.toBeInTheDocument();
   });
 
-  it("copies the Command Code API-key snippet without sending the key anywhere", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-
-    render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
-
-    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-
-    await vi.waitFor(() => {
-      expect(writeText).toHaveBeenCalledTimes(1);
-    });
-    const snippet = writeText.mock.calls[0][0];
-    // The snippet reads the key interactively (`read -r -s`) so it never lands
-    // in shell history, then exports it for both the shell profile path and
-    // the macOS app (launchctl) path. It is a template only: no real key.
-    expect(snippet).toContain("read -r -s COMMAND_CODE_API_KEY");
-    expect(snippet).toContain("export COMMAND_CODE_API_KEY");
-    expect(snippet).toContain('launchctl setenv COMMAND_CODE_API_KEY "$COMMAND_CODE_API_KEY"');
-    expect(snippet).not.toMatch(/sk-/);
-    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
-  });
-
-  it("uses Command Code's Windows binary and PowerShell setup", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", clipboard: { writeText } });
-    render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
+  it("keeps the Command Code setup hint free of launchctl on every platform", () => {
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" });
+    const first = render(
+      <UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />,
+    );
     expect(screen.getByText("cmdc auth login")).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-    expect(writeText.mock.calls[0][0]).toContain("Read-Host -AsSecureString\n");
-    expect(writeText.mock.calls[0][0]).toContain("SetEnvironmentVariable");
-    expect(writeText.mock.calls[0][0]).not.toMatch(/launchctl|read -r/);
-  });
+    expect(screen.getByPlaceholderText("Paste API key")).toBeInTheDocument();
+    expect(screen.queryByText(/launchctl/)).not.toBeInTheDocument();
+    first.unmount();
 
-  it("omits macOS launchctl from the Command Code Linux setup", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (X11; Linux x86_64)", clipboard: { writeText } });
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (X11; Linux x86_64)" });
     render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
     expect(screen.getByText("cmd login")).toBeInTheDocument();
-    await fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-    expect(writeText.mock.calls[0][0]).toContain("export COMMAND_CODE_API_KEY");
-    expect(writeText.mock.calls[0][0]).not.toContain("launchctl");
+    expect(screen.queryByText(/launchctl/)).not.toBeInTheDocument();
+  });
+
+  it("explains an environment-provided OpenCode Go key and lets the user save one from the notice", async () => {
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" });
+    const onProviderKeySaved = vi.fn();
+    render(
+      <UsageLimitsPanel
+        opencodeGo={{
+          configured: true,
+          error: null,
+          credential_source: "env",
+          primary_window: { used_percent: 12, reset_at: "2026-10-21T00:00:00.000Z" },
+        }}
+        order={["opencodeGo"]}
+        onProviderKeySaved={onProviderKeySaved}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Using OPENCODE_GO_API_KEY from the environment\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("launchctl unsetenv OPENCODE_GO_API_KEY"),
+    ).toBeInTheDocument();
+
+    await fireEvent.change(screen.getByPlaceholderText("Paste API key"), {
+      target: { value: "stored-key-456" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    });
+
+    await vi.waitFor(() => {
+      expect(saveProviderApiKey).toHaveBeenCalledWith("opencode-go", "stored-key-456");
+    });
+    expect(onProviderKeySaved).toHaveBeenCalledTimes(1);
   });
 
   it("does not describe a pace marker when the provider cannot render one (issue 445)", () => {
@@ -474,6 +591,139 @@ describe("UsageLimitsPanel", () => {
       displayMode: "remaining",
     }));
     expect(group.querySelectorAll("div.absolute.top-0.h-full")).toHaveLength(0);
+  });
+
+  it("shows Grok's remaining pool as one bar and lists used product shares on click", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T00:00:00.000Z"));
+    const resetAt = "2026-10-01T00:00:00.000Z";
+    render(createElement(UsageLimitsPanel, {
+      grok: {
+        configured: true,
+        error: null,
+        period_type: "weekly",
+        primary_window: { used_percent: 62, reset_at: resetAt },
+        products: [
+          { product: "GrokBuild", label: "Grok Build", window: { used_percent: 45, reset_at: resetAt } },
+          { product: "GrokChat", label: "Chat", window: { used_percent: 13, reset_at: resetAt } },
+          { product: "GrokVoice", label: "Voice", window: { used_percent: 3, reset_at: resetAt } },
+          { product: "GrokNew", label: "Grok New", window: { used_percent: 0.4, reset_at: resetAt } },
+        ],
+      },
+      order: ["grok"],
+      displayMode: "remaining",
+    }));
+
+    // Collapsed: one whole-pool bar in the selected remaining orientation.
+    expect(document.querySelector("[data-limit-legend]")).toBeNull();
+    expect(document.querySelector("[data-limit-share-note]")).toBeNull();
+    expect(document.querySelectorAll("[data-limit-segment]")).toHaveLength(0);
+    const group = screen.getByText("38%").closest("[role='button']");
+    expect(within(group).queryByText("62%")).toBeNull();
+    // Products are legend entries, not rows with their own 0–100% track.
+    const rowLabels = [...group.querySelectorAll("[data-limit-label]")].map((el) => el.textContent);
+    expect(rowLabels).toEqual([copy("limits.label.grok_week")]);
+    // Pace mark in remaining orientation: one day of seven elapsed.
+    let markers = group.querySelectorAll("div.absolute.top-0.h-full");
+    expect(markers).toHaveLength(2);
+    expect(markers[1].style.left).toContain("85.714");
+
+    // Clicking the group reveals each product's used share. The bar stays a
+    // single remaining fill so the headline is not the sum of those shares.
+    fireEvent.click(group);
+    const legend = group.querySelector("[data-limit-legend]");
+    expect(legend).not.toBeNull();
+    expect(group.querySelectorAll("[data-limit-segment]")).toHaveLength(0);
+    expect(group.querySelector("[data-limit-share-note]")).not.toBeNull();
+    expect(within(group).getByText(copy("limits.grok.shares_are_used"))).toBeInTheDocument();
+    expect(within(group).getByText("38%")).toBeInTheDocument();
+    expect(within(group).queryByText("62%")).toBeNull();
+    expect(within(legend).getByText("Grok Build")).toBeInTheDocument();
+    expect(within(legend).getByText(copy("limits.label.grok_chat"))).toBeInTheDocument();
+    expect(within(legend).getByText(copy("limits.label.grok_voice"))).toBeInTheDocument();
+    expect(within(legend).getByText("Grok New")).toBeInTheDocument();
+    expect(within(legend).getByText("45%")).toBeInTheDocument();
+    expect(within(legend).getByText(`${copy("limits.bar.sub_one_percent")}%`)).toBeInTheDocument();
+    markers = group.querySelectorAll("div.absolute.top-0.h-full");
+    expect(markers).toHaveLength(2);
+    expect(markers[1].style.left).toContain("85.714");
+    expect(within(group).getByText(copy("limits.explain.body_remaining"))).toBeInTheDocument();
+  });
+
+  it.each([[], [{ product: "GrokBuild", window: { used_percent: 0 } }]])("shows a full Grok pool in remaining mode after reset with products %j", (products) => {
+    render(<UsageLimitsPanel order={["grok"]} displayMode="remaining" grok={{
+      configured: true, period_type: "weekly",
+      primary_window: { used_percent: 0 },
+      secondary_window: { used_percent: 20 },
+      products,
+    }} />);
+    const group = screen.getByRole("button", { name: /^Grok Build/ });
+    expect(within(group).getByText("100%")).toBeInTheDocument();
+    expect(within(group).getByText("80%")).toBeInTheDocument();
+    fireEvent.click(group);
+    expect(group.querySelector("[data-limit-segments]")).toBeNull();
+    expect(group.querySelector("[data-limit-share-note]")).toBeNull();
+    expect(within(group).getAllByText(copy("limits.explain.remaining", { label: copy("limits.label.grok_week"), used: "100" }))).toHaveLength(2);
+  });
+
+  it.each([98, 97])("budgets near-full Grok slices with %s percent in the first product", (first) => {
+    render(<UsageLimitsPanel order={["grok"]} displayMode="used" grok={{
+      configured: true, primary_window: { used_percent: first + 2 },
+      products: [
+        { product: "GrokBuild", window: { used_percent: first } },
+        { product: "GrokChat", window: { used_percent: 1 } },
+        { product: "GrokVoice", window: { used_percent: 1 } },
+      ],
+    }} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Grok Build/ }));
+    const slices = [...document.querySelectorAll("[data-limit-segment]")];
+    expect(slices.map((slice) => Number(slice.style.flexGrow))).toEqual([first, 1, 1]);
+    for (const slice of slices) {
+      expect(slice.style.flexBasis).toBe("0px");
+      expect(slice).toHaveClass("min-w-0");
+      expect(slice.style.width).toBe("");
+      expect(slice.style.minWidth).toBe("");
+    }
+    const remainder = document.querySelector("[data-limit-remainder]");
+    if (first === 98) expect(remainder).toBeNull();
+    else expect(remainder.style.flexGrow).toBe("1");
+  });
+
+  it("opens and closes Grok's product breakdown from the keyboard", () => {
+    const resetAt = "2026-10-01T00:00:00.000Z";
+    render(createElement(UsageLimitsPanel, {
+      grok: {
+        configured: true,
+        error: null,
+        period_type: "weekly",
+        primary_window: { used_percent: 58, reset_at: resetAt },
+        products: [
+          { product: "GrokBuild", label: "Grok Build", window: { used_percent: 45, reset_at: resetAt } },
+          { product: "GrokChat", label: "Chat", window: { used_percent: 13, reset_at: resetAt } },
+        ],
+      },
+      order: ["grok"],
+    }));
+
+    const group = screen.getByText("58%").closest("[role='button']");
+    // Reachable by Tab, with a visible focus ring like the card's other toggles.
+    expect(group).toHaveAttribute("tabindex", "0");
+    expect(group.className).toContain("focus-visible:ring-2");
+    expect(group).toHaveAttribute("aria-expanded", "false");
+
+    group.focus();
+    fireEvent.keyDown(group, { key: "Enter" });
+    expect(group).toHaveAttribute("aria-expanded", "true");
+    const legend = group.querySelector("[data-limit-legend]");
+    expect(legend).not.toBeNull();
+    expect(group.querySelectorAll("[data-limit-segment]")).toHaveLength(2);
+    expect(within(legend).getByText("Grok Build")).toBeInTheDocument();
+    expect(within(legend).getByText("45%")).toBeInTheDocument();
+
+    fireEvent.keyDown(group, { key: " " });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(group.querySelector("[data-limit-legend]")).toBeNull();
+    expect(group.querySelectorAll("[data-limit-segment]")).toHaveLength(0);
   });
 
   it("surfaces a configured OpenCode Go error instead of rendering bars", () => {
@@ -626,6 +876,26 @@ describe("UsageLimitsPanel", () => {
     const badge = screen.getAllByText(/^cached/i).find((node) => /10m/i.test(node.textContent));
     expect(badge).toHaveTextContent(/10m/i);
     expect(screen.getByText("Cached limits. Run Qoder to refresh.")).toBeInTheDocument();
+  });
+
+  it("renders Qoder CN plan, add-on credits and Ultimate calls as separate buckets", () => {
+    const data = {
+      configured: true,
+      primary_window: { used_percent: 25, used_credits: 25, limit_credits: 100, remaining_credits: 75 },
+      secondary_window: { used_percent: 40, used_credits: 80, limit_credits: 200, remaining_credits: 120, unit: "calls" },
+      tertiary_window: { used_percent: 7, used_credits: 35, limit_credits: 500, remaining_credits: 465, unit: "credits" },
+    };
+    const { rerender } = render(<UsageLimitsPanel qoderCn={data} order={["qoderCn"]} />);
+    expect(screen.getByText(copy("limits.label.qoder_cn_credits"))).toBeInTheDocument();
+    expect(screen.getByText(copy("limits.label.qoder_cn_addon_credits"))).toBeInTheDocument();
+    expect(screen.getByText(copy("limits.label.qoder_cn_ultimate"))).toBeInTheDocument();
+    expect(screen.getByText("7%")).toBeInTheDocument();
+    const details = screen.getAllByRole("tooltip").map((tip) => tip.textContent);
+    expect(details.some((text) => /25[\s\S]*100[\s\S]*75/.test(text))).toBe(true);
+    expect(details.some((text) => /35[\s\S]*500[\s\S]*465/.test(text))).toBe(true);
+    expect(details.some((text) => /80[\s\S]*200[\s\S]*120/.test(text))).toBe(true);
+    rerender(<UsageLimitsPanel qoderCn={{ ...data, tertiary_window: undefined }} order={["qoderCn"]} />);
+    expect(screen.queryByText(copy("limits.label.qoder_cn_addon_credits"))).not.toBeInTheDocument();
   });
 
   it("appends plan_label to the provider title when present", () => {
