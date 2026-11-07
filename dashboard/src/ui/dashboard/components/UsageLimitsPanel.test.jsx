@@ -8,6 +8,8 @@ import { UsageLimitsPanel } from "./UsageLimitsPanel.jsx";
 
 vi.mock("../../../lib/api", () => ({
   saveProviderApiKey: vi.fn(),
+  isLocalhostHost: () => true,
+  updateCursorConnection: vi.fn(),
 }));
 
 function formatExpiry(iso) {
@@ -53,31 +55,49 @@ afterEach(() => {
 });
 
 describe("UsageLimitsPanel", () => {
+  it.each([
+    [EN_LOCALE, "Custom backend — Anthropic limits not applicable"],
+    [ZH_CN_LOCALE, "自定义后端 — Anthropic 限额不适用"],
+  ])("shows custom Claude limits explicitly in %s", async (locale, message) => {
+    setCopyLocale(locale);
+    render(<UsageLimitsPanel order={["claude"]} claude={{ configured: true, backend: "custom", limits_status: "not_applicable" }} />);
+    await waitFor(() => expect(screen.getByText(message)).toBeVisible());
+    expect(screen.queryByText("0%")).not.toBeInTheDocument();
+  });
+
   afterEach(() => {
     setCopyLocale(EN_LOCALE);
   });
 
-  it("shows one WorkBuddy row with exact credit amounts on hover and keyboard expansion in Chinese", async () => {
+  it("shows one row per WorkBuddy edition with plan and resource windows in Chinese", async () => {
     setCopyLocale(ZH_CN_LOCALE);
     render(<UsageLimitsPanel order={["workbuddy", "workbuddyAi"]}
       displayMode="remaining"
       workbuddy={{ configured: true, plan_label: "Free", primary_window: {
         used_percent: 50.586, used_credits: 252.92999996, limit_credits: 500, remaining_credits: 247.07000004,
+      }, secondary_window: {
+        used_percent: 36.55, used_credits: 2206.96999938, limit_credits: 6038, remaining_credits: 3831.03000062,
+      } }}
+      workbuddyAi={{ configured: true, plan_label: "Free", primary_window: {
+        used_percent: 0, used_credits: 0, limit_credits: 100, remaining_credits: 100,
       } }}
     />);
     expect(screen.getByRole("button", { name: /^WorkBuddy Free/ })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /^WorkBuddy/ })).toHaveLength(1);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("已用 252.93 / 500 点额度 · 剩余 247.07");
+    expect(screen.getByRole("button", { name: /^WorkBuddy AI Free/ })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^WorkBuddy/ })).toHaveLength(2);
+    expect(screen.getAllByRole("tooltip").some((node) => node.textContent.includes("已用 252.93 / 500 点额度 · 剩余 247.07"))).toBe(true);
     expect(screen.getByText("49%")).toBeInTheDocument();
-    expect(screen.queryByText("WorkBuddy AI")).not.toBeInTheDocument();
+    // The resource-package window shares the CN row, two decimals preserved.
+    expect(screen.getByText("资源包")).toBeInTheDocument();
+    expect(screen.getByText("63%")).toBeInTheDocument();
     expect(screen.queryByText(/体验版/)).not.toBeInTheDocument();
     fireEvent.keyDown(screen.getByRole("button", { name: /^WorkBuddy Free/ }), { key: "Enter" });
     await waitFor(() => expect(screen.getByText("已用 252.93 / 500 点额度 · 剩余 247.07")).toBeVisible());
   });
 
-  it("keeps the international English plan name in the single WorkBuddy row", () => {
-    render(<UsageLimitsPanel workbuddy={{ configured: true, plan_label: "Pro-Trial", primary_window: { used_percent: 20 } }} />);
-    expect(screen.getByRole("button", { name: /^WorkBuddy Pro-Trial/ })).toBeInTheDocument();
+  it("keeps the international English plan name in its own WorkBuddy AI row", () => {
+    render(<UsageLimitsPanel workbuddyAi={{ configured: true, plan_label: "Pro-Trial", primary_window: { used_percent: 20 } }} />);
+    expect(screen.getByRole("button", { name: /^WorkBuddy AI Pro-Trial/ })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /^WorkBuddy/ })).toHaveLength(1);
   });
 
@@ -127,6 +147,52 @@ describe("UsageLimitsPanel", () => {
     expect(main).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByText("GLM-5.3-Flash · ZCode Trust Build")).not.toBeInTheDocument();
     expect(screen.getByText("98%")).toBeInTheDocument();
+  });
+
+  it("renders the other region's log snapshot as an independently collapsible section", () => {
+    render(
+      <UsageLimitsPanel
+        order={["zcode"]}
+        displayMode="remaining"
+        zcode={{
+          configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+          primary_window: { used_percent: 2 },
+          secondary_window: { used_percent: 30 },
+          other_region: {
+            source: "zcode-log", region: "zai", provider_key: "account:zai-start-plan",
+            plan_kind: "start-plan", plan_label: "Start",
+            log_timestamp: "2026-07-08T01:08:30.077Z",
+            buckets: [{
+              label: "GLM-5.3", plan_name: "ZCode Start Plan", period: "daily",
+              remaining_units: 2_400_000, total_units: 3_000_000,
+              window: { used_percent: 20, reset_at: "2030-10-07T16:00:00.000Z" },
+            }],
+            primary_window: { used_percent: 20, reset_at: "2030-10-07T16:00:00.000Z" },
+          },
+        }}
+      />,
+    );
+    const section = screen.getByRole("button", { name: "Z.ai · Start" });
+    expect(section).toHaveAttribute("aria-expanded", "false");
+    const snapshot = copy("limits.zcode.other_region.snapshot", { time: formatExpiry("2026-07-08T01:08:30.077Z") });
+    expect(screen.queryByText(snapshot)).not.toBeInTheDocument();
+    fireEvent.click(section);
+    expect(section).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(snapshot)).toBeInTheDocument();
+    expect(screen.getByText("80%")).toBeInTheDocument();
+  });
+
+  it("hides the other-region section when the payload has no snapshot", () => {
+    render(
+      <UsageLimitsPanel
+        order={["zcode"]}
+        zcode={{
+          configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+          primary_window: { used_percent: 2 },
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Z.ai · Start" })).not.toBeInTheDocument();
   });
 
   it("shows separate usable 5h and weekly reset counts with their earliest expiries", () => {
@@ -215,6 +281,52 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByText(/Reset status unavailable/)).toBeInTheDocument();
     const section = screen.getByText(copy("limits.zcode.reset_bank.title")).closest("div");
     expect(within(section).queryByText(copy("limits.label.zcode_5h"))).not.toBeInTheDocument();
+  });
+
+  it("hides the whole reset section when no window has live cards", () => {
+    render(<UsageLimitsPanel order={["zcode"]} zcode={{
+      configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+      primary_window: { used_percent: 2 },
+      // An expired card and an empty list are both "spent": neither may
+      // resurrect the section the way the Codex reset bank never does.
+      reset_credits: {
+        five_hour: [{ expires_at: "2000-01-01T00:00:00Z" }],
+        weekly: [],
+      },
+    }} />);
+    expect(screen.queryByText(copy("limits.zcode.reset_bank.title"))).not.toBeInTheDocument();
+    expect(screen.queryByText(copy("limits.zcode.reset_bank.count", { count: 0 }))).not.toBeInTheDocument();
+  });
+
+  it("drops zero-count reset rows while keeping the window that still has cards", () => {
+    render(<UsageLimitsPanel order={["zcode"]} zcode={{
+      configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+      primary_window: { used_percent: 2 },
+      reset_credits: {
+        five_hour: [],
+        weekly: [{ expires_at: "2030-10-20T09:00:00Z" }],
+      },
+    }} />);
+    // The collapsed badge counts only the window that still has cards.
+    expect(screen.getByText(copy("limits.zcode.reset_bank.count", { count: 1 }))).toBeInTheDocument();
+    fireEvent.click(screen.getByText(copy("limits.zcode.reset_bank.title")));
+    const section = screen.getByText(copy("limits.zcode.reset_bank.title")).closest("div");
+    expect(within(section).queryByText(copy("limits.label.zcode_5h"))).not.toBeInTheDocument();
+    expect(within(section).getByText(copy("limits.label.zcode_weekly"))).toBeInTheDocument();
+    expect(within(section).getByText(copy("limits.zcode.reset_bank.earliest", {
+      time: formatExpiry("2030-10-20T09:00:00Z"),
+    }))).toBeInTheDocument();
+  });
+
+  it("lets the no-data placeholder through when the reset bank is spent", () => {
+    render(<UsageLimitsPanel order={["zcode"]} zcode={{
+      configured: true, plan_label: "Pro", plan_kind: "coding-plan",
+      reset_credits: { five_hour: [], weekly: [] },
+    }} />);
+    // A spent bank must hand LimitWindowSection a real null: a truthy element
+    // that renders nothing would suppress the placeholder and blank the body.
+    expect(screen.getByText(copy("limits.status.no_data"))).toBeInTheDocument();
+    expect(screen.queryByText(copy("limits.zcode.reset_bank.title"))).not.toBeInTheDocument();
   });
 
   it("shows provider status rows instead of hiding configured providers with errors", () => {
@@ -471,6 +583,95 @@ describe("UsageLimitsPanel", () => {
     render(<UsageLimitsPanel commandCode={{ configured: false }} order={["commandCode"]} />);
     expect(screen.getByText("cmd login")).toBeInTheDocument();
     expect(screen.queryByText(/launchctl/)).not.toBeInTheDocument();
+  });
+
+  it("renders the DeepSeek balance card with one row per currency and no bars", () => {
+    render(
+      <UsageLimitsPanel
+        deepseek={{
+          configured: true,
+          error: null,
+          is_available: true,
+          balances: [
+            { currency: "CNY", total: 110.02, granted: 0, topped_up: 110.02 },
+            { currency: "USD", total: 15.5, granted: 2, topped_up: 13.5 },
+          ],
+        }}
+        order={["deepseek"]}
+      />,
+    );
+
+    expect(screen.getByText("DeepSeek")).toBeInTheDocument();
+    expect(screen.getByText("Balance (CNY)")).toBeInTheDocument();
+    expect(screen.getByText("Balance (USD)")).toBeInTheDocument();
+    expect(screen.getByText("110.02")).toBeInTheDocument();
+    expect(screen.getByText("15.5")).toBeInTheDocument();
+    expect(screen.getByText("incl. grant 2")).toBeInTheDocument();
+    // A pay-as-you-go balance invents no window bar (issue 960): no progress bar
+    // may appear inside the balance card.
+    expect(document.querySelector("[data-deepseek-balance] .rounded-full")).toBeNull();
+  });
+
+  it("shows the DeepSeek unavailable notice while keeping balances visible", () => {
+    render(
+      <UsageLimitsPanel
+        deepseek={{
+          configured: true,
+          error: null,
+          is_available: false,
+          balances: [{ currency: "CNY", total: 0, granted: 0, topped_up: 0 }],
+        }}
+        order={["deepseek"]}
+      />,
+    );
+
+    expect(screen.getByText("Balance (CNY)")).toBeInTheDocument();
+    expect(screen.getByText(/unavailable/)).toBeInTheDocument();
+  });
+
+  it("shows the DeepSeek setup hint with the platform link when not connected", () => {
+    render(<UsageLimitsPanel deepseek={{ configured: false }} order={["deepseek"]} />);
+
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(screen.getByText("Connect DeepSeek")).toBeInTheDocument();
+    expect(screen.getByText("Open platform.deepseek.com")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Paste API key")).toBeInTheDocument();
+  });
+
+  it("keeps the DeepSeek setup hint on an error row so a rejected key can be replaced", () => {
+    render(
+      <UsageLimitsPanel
+        deepseek={{ configured: true, error: "DeepSeek API key was rejected (401). Check the key in the DeepSeek platform console.", auth_error: true }}
+        order={["deepseek"]}
+      />,
+    );
+
+    expect(screen.getByText(/rejected \(401\)/)).toBeInTheDocument();
+    expect(screen.getByText("Connect DeepSeek")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Paste API key")).toBeInTheDocument();
+  });
+
+  it("explains an environment-provided DeepSeek key on an error row so the saved key can take over", () => {
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" });
+    render(
+      <UsageLimitsPanel
+        deepseek={{
+          configured: true,
+          error: "DeepSeek API key was rejected (401). Check the key in the DeepSeek platform console.",
+          auth_error: true,
+          credential_source: "env",
+        }}
+        order={["deepseek"]}
+      />,
+    );
+
+    expect(screen.getByText(/rejected \(401\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Using DEEPSEEK_API_KEY from the environment\./),
+    ).toBeInTheDocument();
+    expect(screen.getByText("launchctl unsetenv DEEPSEEK_API_KEY")).toBeInTheDocument();
+    // One input from the setup hint, one from the env notice.
+    expect(screen.getAllByPlaceholderText("Paste API key")).toHaveLength(2);
   });
 
   it("explains an environment-provided OpenCode Go key and lets the user save one from the notice", async () => {
@@ -817,7 +1018,7 @@ describe("UsageLimitsPanel", () => {
     expect(screen.getByRole("tooltip")).toHaveTextContent(/25.*100.*75/);
   });
 
-  it("renders Qoder Ultimate Free Calls separately from Plan Credits", () => {
+  it("drops an empty Plan Credits row and keeps Ultimate Free Calls", () => {
     render(
       <UsageLimitsPanel
         qoder={{
@@ -843,7 +1044,7 @@ describe("UsageLimitsPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Credits")).toBeInTheDocument();
+    expect(screen.queryByText("Credits")).not.toBeInTheDocument();
     expect(screen.getByText("Ultimate Free Calls")).toBeInTheDocument();
     expect(screen.getByText("66%")).toBeInTheDocument();
     expect(screen.getAllByRole("tooltip").some((tip) => /789[\s\S]*1200[\s\S]*411/.test(tip.textContent))).toBe(true);
@@ -896,6 +1097,71 @@ describe("UsageLimitsPanel", () => {
     expect(details.some((text) => /80[\s\S]*200[\s\S]*120/.test(text))).toBe(true);
     rerender(<UsageLimitsPanel qoderCn={{ ...data, tertiary_window: undefined }} order={["qoderCn"]} />);
     expect(screen.queryByText(copy("limits.label.qoder_cn_addon_credits"))).not.toBeInTheDocument();
+  });
+
+  it("renders Qoder plan, add-on credits and Ultimate calls as separate buckets", () => {
+    const data = {
+      configured: true,
+      primary_window: { used_percent: 25, used_credits: 25, limit_credits: 100, remaining_credits: 75 },
+      secondary_window: { used_percent: 40, used_credits: 80, limit_credits: 200, remaining_credits: 120, unit: "calls" },
+      tertiary_window: { used_percent: 7, used_credits: 35, limit_credits: 500, remaining_credits: 465, unit: "credits" },
+    };
+    const { rerender } = render(<UsageLimitsPanel qoder={data} order={["qoder"]} />);
+    expect(screen.getByText(copy("limits.label.qoder_credits"))).toBeInTheDocument();
+    expect(screen.getByText(copy("limits.label.qoder_addon_credits"))).toBeInTheDocument();
+    expect(screen.getByText(copy("limits.label.qoder_ultimate"))).toBeInTheDocument();
+    const details = screen.getAllByRole("tooltip").map((tip) => tip.textContent);
+    expect(details.some((text) => /25[\s\S]*100[\s\S]*75/.test(text))).toBe(true);
+    expect(details.some((text) => /35[\s\S]*500[\s\S]*465/.test(text))).toBe(true);
+    expect(details.some((text) => /80[\s\S]*200[\s\S]*120/.test(text))).toBe(true);
+    rerender(<UsageLimitsPanel qoder={{ ...data, tertiary_window: undefined }} order={["qoder"]} />);
+    expect(screen.queryByText(copy("limits.label.qoder_addon_credits"))).not.toBeInTheDocument();
+  });
+
+  it("shows WorkBuddy-style inline credit detail on expanded Qoder and Qoder CN rows", async () => {
+    const data = {
+      configured: true,
+      primary_window: { used_percent: 25, used_credits: 25, limit_credits: 100, remaining_credits: 75 },
+      secondary_window: { used_percent: 40, used_credits: 80, limit_credits: 200, remaining_credits: 120, unit: "calls" },
+      tertiary_window: { used_percent: 36.55, used_credits: 2206.96999938, limit_credits: 6038, remaining_credits: 3831.03000062 },
+    };
+    // Expected strings go through the same copy keys and the same runtime
+    // locale formatting as the panel, so the assertions hold on any machine.
+    const fmt = (value, { useGrouping = true } = {}) => new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+      useGrouping,
+    }).format(value);
+    const creditsDetail = copy("limits.codex_credits.detail", { used: fmt(25), limit: fmt(100), remaining: fmt(75) });
+    const addonDetail = copy("limits.codex_credits.detail", {
+      used: fmt(2206.96999938), limit: fmt(6038), remaining: fmt(3831.03000062),
+    });
+    const callsDetail = copy("limits.qoder_calls.detail", {
+      used: fmt(80, { useGrouping: false }), limit: fmt(200, { useGrouping: false }), remaining: fmt(120, { useGrouping: false }),
+    });
+    render(<UsageLimitsPanel qoder={data} qoderCn={data} order={["qoder", "qoderCn"]} />);
+    fireEvent.keyDown(screen.getByRole("button", { name: /^Qoder Credits/ }), { key: "Enter" });
+    // The spec pins creditPrecision: 2, so fractional add-on credits ≥ 100
+    // keep two decimals instead of the default integer rounding; calls skip
+    // digit grouping and switch to the calls wording.
+    await waitFor(() => expect(screen.getByText(creditsDetail)).toBeVisible());
+    expect(screen.getByText(addonDetail)).toBeInTheDocument();
+    expect(screen.getByText(callsDetail)).toBeInTheDocument();
+    // Only one card expands at a time: switching to Qoder CN collapses Qoder,
+    // and the CN card renders the same inline detail for its windows.
+    fireEvent.keyDown(screen.getByRole("button", { name: /^Qoder CN Credits/ }), { key: "Enter" });
+    await waitFor(() => expect(screen.getByText(creditsDetail)).toBeVisible());
+  });
+
+  it("drops Qoder windows with no quota instead of rendering empty bars", () => {
+    const data = {
+      configured: true,
+      primary_window: { used_percent: 0, used_credits: 0, limit_credits: 0, remaining_credits: 0 },
+      tertiary_window: { used_percent: 6.09, used_credits: 67, limit_credits: 1100, remaining_credits: 1033 },
+    };
+    render(<UsageLimitsPanel qoder={data} order={["qoder"]} />);
+    expect(screen.queryByText(copy("limits.label.qoder_credits"))).not.toBeInTheDocument();
+    expect(screen.getByText(copy("limits.label.qoder_addon_credits"))).toBeInTheDocument();
   });
 
   it("appends plan_label to the provider title when present", () => {
@@ -1240,6 +1506,14 @@ describe("UsageLimitsPanel", () => {
     // Collapsed: top-right auto-renew icon badge and the "Subscription" bar label.
     expect(screen.getByRole("img", { name: "Auto-renew" })).toBeInTheDocument();
     expect(screen.getByText("Subscription")).toBeInTheDocument();
+    // SubscriptionBar must opt into widest-label measurement like LimitBar,
+    // otherwise CJK "订阅" is clipped by --tt-limits-label-w from short 5h/7d labels (#1019).
+    const subscriptionLabel = screen.getByText("Subscription");
+    expect(subscriptionLabel.hasAttribute("data-limit-label")).toBe(true);
+    const labelGroup = subscriptionLabel.closest("[data-limit-label-group]");
+    expect(labelGroup).not.toBeNull();
+    const measured = [...labelGroup.querySelectorAll("[data-limit-label]")].map((el) => el.textContent);
+    expect(measured).toContain("Subscription");
 
     // Expanding reveals the subscription detail line.
     fireEvent.click(screen.getByText("Cursor").closest("[role='button']"));

@@ -789,7 +789,9 @@ export async function getUsageMonthly({
   }, { accessToken });
 }
 
-export async function getUsageLimits(opts: { refresh?: boolean; devinEnabled?: boolean } = {}) {
+export async function getUsageLimits(
+  opts: { refresh?: boolean; devinEnabled?: boolean; hiddenProviders?: readonly string[] } = {},
+) {
   const params: AnyRecord = opts?.refresh ? { refresh: "1" } : {};
   const options: AnyRecord = {};
   // Devin quota is opt-in: devin=1 is honored by the local API only together
@@ -798,6 +800,18 @@ export async function getUsageLimits(opts: { refresh?: boolean; devinEnabled?: b
   // is nothing to opt in to, so the flag is not sent at all.
   if (opts?.devinEnabled === true && isLocalhostHost()) {
     params.devin = "1";
+  }
+  // Provider visibility (issue 956): hidden providers are not fetched at all — no
+  // upstream call, no credential read. Same loopback-auth requirement as the
+  // devin opt-in, same off-host silence; an empty list sends nothing, which
+  // keeps legacy clients (and the hosted site) on the fetch-everything path.
+  const hiddenProviders = (opts?.hiddenProviders ?? []).filter(
+    (id) => typeof id === "string" && id !== "",
+  );
+  if (hiddenProviders.length > 0 && isLocalhostHost()) {
+    params.hidden = hiddenProviders.join(",");
+  }
+  if ((params.devin || params.hidden) && isLocalhostHost()) {
     options.headers = {
       Accept: "application/json",
       ...(await getLocalApiAuthHeaders()),
@@ -806,13 +820,35 @@ export async function getUsageLimits(opts: { refresh?: boolean; devinEnabled?: b
   return fetchLocalJson(PATHS.usageLimits, params, options);
 }
 
+export type CursorConnection = {
+  status: "disconnected" | "pending" | "connected" | "expired" | "failed" | "cancelled";
+  attemptId?: string;
+  authUrl?: string;
+  expiresAt?: number | string;
+};
+
+export async function updateCursorConnection(
+  action?: "start" | "poll" | "cancel" | "disconnect",
+  attemptId?: string,
+): Promise<CursorConnection> {
+  if (!isLocalhostHost()) throw new Error("Cursor connections require the local dashboard");
+  const response = await fetch("/functions/tokentracker-cursor-connection", {
+    method: action ? "POST" : "GET",
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...(await getLocalApiAuthHeaders()) },
+    ...(action ? { body: JSON.stringify({ action, attemptId }) } : {}),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Request failed with HTTP ${response.status}`);
+  return response.json();
+}
+
 /**
  * Saves a provider API key in TokenTracker's own 0600 store (never the launch
  * environment). Only the local backend implements this endpoint; the key is
  * sent to the loopback server and is never logged or echoed back.
  */
 export async function saveProviderApiKey(
-  provider: "opencode-go" | "command-code",
+  provider: "opencode-go" | "command-code" | "deepseek",
   apiKey: string,
 ): Promise<{ ok: boolean; configured: boolean; source: string }> {
   const authHeaders = await getLocalApiAuthHeaders();

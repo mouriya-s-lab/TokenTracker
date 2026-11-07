@@ -28,11 +28,13 @@ async function truth(user, dev) {
 
 test.before(async () => {
   db = await setup();
+  await db.exec(migration("20261104165655_skip-empty-leaderboard-repair-spans.sql"));
   for (const name of ["20261003120000_cloud-subscriptions.sql", "20261004120000_cloud-machine-access.sql",
     "20261007120000_cloud-waffo.sql", "20261007130000_cloud-waffo-retry.sql", "20261007140000_cloud-waffo-attempts.sql",
     "20261007150000_cloud-waffo-authorizations.sql", "20261007160000_cloud-waffo-sandbox-periods.sql", "20261008120000_self-hosted-access.sql"]) await db.exec(migration(name));
   const files = ["20260918041500_fold-account-summary-and-heatmap-aggregation.sql", "20260918043000_fold-account-model-breakdown-aggregation.sql",
-    "20260918050000_fold-account-daily-aggregation.sql", "20261002090000_compact-account-model-wire.sql", "20261003093000_compact-account-summary-model-wire.sql"];
+    "20260918050000_fold-account-daily-aggregation.sql", "20261002090000_compact-account-model-wire.sql", "20261003093000_compact-account-summary-model-wire.sql",
+    "20261102090000_add-conversations-to-account-model-breakdown-wire.sql"];
   for (const name of files) {
     const source = migration(name);
     const functions = [...source.matchAll(/CREATE OR REPLACE FUNCTION public\.(\w+)\(/g)].map(match => match[1]);
@@ -63,7 +65,8 @@ test.after(async () => db?.close());
 test("maps cover actual handler calls without custom schemas or identifier truncation", () => {
   for (const name of ["cloud_issue_device_token", "cloud_ingest_usage", "cloud_account_access", "cloud_membership",
     "cloud_list_machines", "cloud_remove_machine", "cloud_resume_machine", "cloud_grant_device_code", "account_summary_wire",
-    "account_daily_wire", "account_heatmap_wire", "account_model_breakdown_wire", "account_usage_grouped_cached", "account_usage_grouped"]) {
+    "account_daily_wire", "account_heatmap_wire", "account_model_breakdown_wire", "account_usage_grouped_cached", "account_usage_grouped",
+    "leaderboard_rollup_next_day_v2"]) {
     assert.equal(qa.RPC_MAP[name], qa.PREFIX + name);
   }
   for (const name of Object.values(qa.OBJECT_MAP)) assert.ok(Buffer.byteLength(name) <= 63);
@@ -107,9 +110,27 @@ test("all QA tables, sequences and functions reject anonymous and authenticated 
   for (const role of ["anon", "authenticated"]) {
     assert.equal((await db.query(`SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE') allowed`, [role, table("tokentracker_device_tokens")])).rows[0].allowed, false);
     assert.equal((await db.query("SELECT has_function_privilege($1,$2,'EXECUTE') allowed", [role, qa.RPC_MAP.cloud_membership + "(uuid,text)"])).rows[0].allowed, false);
+    assert.equal((await db.query("SELECT has_function_privilege($1,$2,'EXECUTE') allowed", [role, qa.RPC_MAP.leaderboard_rollup_next_day_v2 + "(timestamptz,timestamptz)"])).rows[0].allowed, false);
     assert.equal((await db.query("SELECT has_sequence_privilege($1,$2,'USAGE') allowed", [role, qa.OBJECT_MAP.tokentracker_usage_revision_seq])).rows[0].allowed, false);
     await assert.rejects(db.transaction(async tx => { await tx.exec("SET LOCAL ROLE " + role); await tx.query(`SELECT * FROM ${table("tokentracker_hourly")}`); }), /permission denied/);
   }
+});
+
+test("cloned sparse-repair helper discovers only QA history", async () => {
+  const rollback = new Error("rollback isolated helper fixtures");
+  await assert.rejects(db.transaction(async tx => {
+    for (const [name, date] of [["tokentracker_leaderboard_rollup_daily_v2", "2000-01-01"],
+      [table("tokentracker_leaderboard_rollup_daily_v2"), "2000-02-01"]]) {
+      await tx.query(`INSERT INTO ${name}(user_id,source,model,pricing_tier,day,total_tokens,
+        input_tokens,output_tokens,cached_input_tokens,cache_creation_input_tokens,reasoning_output_tokens)
+        VALUES($1,'codex','gpt-6','peak',$2,1,1,0,0,0,0)`, [a, date]);
+    }
+    const result = (await tx.query(`SELECT
+      public.leaderboard_rollup_next_day_v2('1970-01-01Z','2001-01-01Z')::text AS original,
+      public.${qa.RPC_MAP.leaderboard_rollup_next_day_v2}('1970-01-01Z','2001-01-01Z')::text AS qa`)).rows[0];
+    assert.deepEqual(result, { original: "2000-01-01", qa: "2000-02-01" });
+    throw rollback;
+  }), error => error === rollback);
 });
 
 test("real QA issuance and ingest never register a token in the original table", async () => {
@@ -153,6 +174,20 @@ test("QA restore and exact erasure preserve the real ledger and another user's u
   assert.deepEqual((await db.query("SELECT to_jsonb(p) r FROM tokentracker_cloud_payments p ORDER BY id")).rows, financial);
   assert.deepEqual(await publicRpc("cloud_membership", [a, "sandbox"]), member);
   assert.equal((await db.query("SELECT count(*)::int n FROM auth.users WHERE id=$1", [a])).rows[0].n, 1);
+});
+
+test("model breakdown compact and wire carry request-only rows to the edge (#990)", async () => {
+  // Erasure above revoked every device, so issue a fresh one for the scoped read.
+  const fresh = await issue(a); assert.equal(fresh.ok, true);
+  await db.query(`DELETE FROM ${table("tokentracker_account_usage_cache")}`, []);
+  await db.query(`INSERT INTO ${table("tokentracker_hourly")}(user_id,device_id,source,model,hour_start,input_tokens,
+    cached_input_tokens,cache_creation_input_tokens,output_tokens,reasoning_output_tokens,total_tokens,billable_total_tokens,conversations,total_cost_usd)
+    VALUES($1,$2,'codex','gpt-6',$3,0,0,0,0,0,0,0,0,0),($1,$2,'qoder','credit-plan',$3,0,0,0,0,0,0,0,5,0)`, [a, fresh.device_id, day + "T06:00:00Z"]);
+  const args = [a, null, day + "T00:00:00Z", day + "T23:59:59Z", "UTC", null, day, day];
+  const compact = await rpc("account_model_breakdown_compact", args);
+  assert.deepEqual(compact, [["codex", "gpt-6", "peak", 0, 0, 0, 0, 0, 0, 0], ["qoder", "credit-plan", "peak", 0, 0, 0, 0, 0, 0, 5]]);
+  const wire = await rpc("account_model_breakdown_wire", args);
+  assert.deepEqual(wire, compact, "tiny payloads keep the legacy array form");
 });
 
 test("installer replay preserves QA rows and original RPCs and rejects another scope", async () => {

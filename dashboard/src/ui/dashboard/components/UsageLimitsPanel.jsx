@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { AlertCircle, ChevronDown, Gift, Clock as ClockIcon, Infinity as InfinityIcon } from "lucide-react";
+import { AlertCircle, ChevronDown, Gift, Globe, Clock as ClockIcon, Infinity as InfinityIcon } from "lucide-react";
 import { FadeIn } from "../../foundation/FadeIn.jsx";
 import { copy, getCopyLocale } from "../../../lib/copy";
 import { LIMIT_DISPLAY_MODES } from "../../../hooks/use-limits-display-prefs.js";
@@ -14,6 +14,7 @@ import { buildResetBankRows } from "./usage-limits-reset-bank.js";
 import { PROVIDER_LIMIT_SPECS } from "./usage-limits-provider-specs.js";
 import { HoverTooltip } from "../../components/HoverTooltip.jsx";
 import { cycleView, countdownText, remainingLabel } from "../../../lib/subscription-display.js";
+import { CursorConnectionControl } from "./CursorConnectionControl.jsx";
 import { saveProviderApiKey } from "../../../lib/api";
 
 const LIMITS_PROVIDER_ICON_CLASS = "shrink-0 text-oai-black dark:text-oai-white";
@@ -21,11 +22,13 @@ const LIMITS_PROVIDER_ICON_CLASS = "shrink-0 text-oai-black dark:text-oai-white"
 const PROVIDER_KEY_ENV = {
   opencodeGo: "OPENCODE_GO_API_KEY",
   commandCode: "COMMAND_CODE_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
 };
 
 const PROVIDER_KEY_STORE_ID = {
   opencodeGo: "opencode-go",
   commandCode: "command-code",
+  deepseek: "deepseek",
 };
 
 function commandCodeSetupPlatform() {
@@ -407,24 +410,24 @@ function StatusBadge({ label, age = null, tone = "live", tooltip = null }) {
   );
 }
 
-function ToolGroup({ name, providerId, children, expandable = false, expanded = false, onToggle, badge = null, rightAdornment = null, toggleOnHeader = false }) {
+function ToolGroup({ name, providerId, children, expandable = false, expanded = false, onToggle, badge = null, rightAdornment = null, toggleOnHeader = false, actions = null }) {
   const providerKey = limitProviderIconKey(providerId);
   const header = (
     <div className="flex min-w-0 items-center gap-3">
       {providerKey ? (
         <ProviderIcon provider={providerKey} size={22} className={LIMITS_PROVIDER_ICON_CLASS} />
       ) : null}
-      <span className="text-base font-semibold text-oai-black dark:text-oai-white">{name}</span>
+      <span className="text-sm font-medium text-oai-black dark:text-oai-white">{name}</span>
       {rightAdornment ? <span className="shrink-0">{rightAdornment}</span> : null}
       {badge}
     </div>
   );
   const cardClass = "rounded-xl border border-oai-gray-200 bg-white dark:border-oai-gray-800 dark:bg-oai-gray-900";
-  const headerClass = "flex w-full items-center justify-between gap-3 border-b border-oai-gray-200 px-4 py-4 text-left dark:border-oai-gray-800 sm:px-5";
+  const headerClass = "flex w-full items-center justify-between gap-3 border-b border-oai-gray-200 px-4 py-3 text-left dark:border-oai-gray-800 sm:px-5";
   const body = <div className="flex flex-col gap-2 px-4 py-4 sm:px-5">{children}</div>;
 
   if (!expandable) {
-    return <div className={cardClass}><div className={headerClass}>{header}</div>{body}</div>;
+    return <div className={cardClass}><div className={headerClass}>{header}{actions}</div>{body}</div>;
   }
 
   if (toggleOnHeader) {
@@ -451,7 +454,7 @@ function ToolGroup({ name, providerId, children, expandable = false, expanded = 
       className={`${cardClass} cursor-pointer transition-colors hover:border-oai-gray-300 dark:hover:border-oai-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-oai-brand-500`}>
       <div className={headerClass}>
         {header}
-        <ChevronDown size={16} aria-hidden className={`shrink-0 text-oai-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
+        <span className="flex shrink-0 items-center gap-1">{actions}<ChevronDown size={16} aria-hidden className={`shrink-0 text-oai-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} /></span>
       </div>
       {body}
     </div>
@@ -506,6 +509,7 @@ function SubscriptionBar({ subscription, now, mode = LIMIT_DISPLAY_MODES.USED })
   return (
     <div className="flex items-center gap-2">
       <span
+        data-limit-label=""
         className="text-xs sm:text-sm text-oai-gray-500 dark:text-oai-gray-400 shrink-0 whitespace-nowrap"
         style={{ width: "var(--tt-limits-label-w)" }}
       >
@@ -696,9 +700,27 @@ const ZCODE_RESET_COUNTDOWN_SCALES_MS = {
   weekly: 7 * 24 * 3600 * 1000,
 };
 
+// Clean-zero visibility gate shared by renderProviderExtra and
+// ZcodeResetBankSection: mirror the Codex reset bank (`buildResetBankRows`)
+// and hide on a clean zero, while a fetch failure always counts as content so
+// the error cannot hide behind the collapse toggle (issue 888).
+// A plain loop, not an arrow chain: the ui-hardcode scanner's `>...<` regex
+// would read an unbraced arrow body here as raw JSX text.
+function zcodeResetBankHasContent(data, now) {
+  if (!data || typeof data !== "object") return false;
+  if (data.error) return true;
+  for (const key of ["five_hour", "weekly"]) {
+    for (const card of data[key] || []) {
+      if (Date.parse(card?.expires_at) > now) return true;
+    }
+  }
+  return false;
+}
+
 function ZcodeResetBankSection({ data }) {
   const [open, setOpen] = useState(false);
   const now = Date.now();
+  if (!zcodeResetBankHasContent(data, now)) return null;
   const groups = [
     { key: "five_hour", label: copy("limits.label.zcode_5h") },
     { key: "weekly", label: copy("limits.label.zcode_weekly") },
@@ -729,7 +751,11 @@ function ZcodeResetBankSection({ data }) {
   // A plain loop, not `reduce`: an unbraced arrow body would let the
   // ui-hardcode scanner's `>...<` regex read this line as raw JSX text.
   let totalLive = 0;
-  for (const group of groups) totalLive += group.cards.length;
+  const liveGroups = [];
+  for (const group of groups) {
+    totalLive += group.cards.length;
+    if (group.cards.length) liveGroups.push(group);
+  }
   return (
     <div className="mt-2 border-t border-oai-gray-200/60 pt-2 dark:border-oai-gray-800">
       <button
@@ -755,7 +781,7 @@ function ZcodeResetBankSection({ data }) {
       ) : null}
       {open && !data.error ? (
         <div className="mt-2 flex flex-col gap-1.5">
-          {groups.map((group) => (
+          {liveGroups.map((group) => (
             <div key={group.key} className="flex items-center gap-2 text-[11px]">
               <span
                 data-limit-label=""
@@ -792,9 +818,60 @@ function ZcodeResetBankSection({ data }) {
   );
 }
 
+// DeepSeek has no quota windows: the official source is the prepaid balance,
+// so the row is a balance card — one line per currency, no bar and no reset
+// countdown (issue 960). Mapping a balance onto the used-percent window shape would
+// render a fake "used 0" bar (owner call: no invented window bars).
+function DeepseekBalanceSection({ data }) {
+  const balances = Array.isArray(data?.balances) ? data.balances : [];
+  return (
+    <div className="mt-1 space-y-1" data-deepseek-balance="">
+      {balances.map((entry) => {
+        const currency = String(entry?.currency || "").toUpperCase();
+        const total = formatCreditAmount(entry?.total, { maximumFractionDigits: 2 });
+        const granted = Number(entry?.granted) > 0
+          ? formatCreditAmount(entry.granted, { maximumFractionDigits: 2 })
+          : null;
+        if (!currency || !total) return null;
+        return (
+          <div key={currency} className="flex items-center gap-2">
+            <span
+              data-limit-label=""
+              className="text-xs sm:text-sm text-oai-gray-500 dark:text-oai-gray-400 shrink-0 whitespace-nowrap"
+              style={{ width: "var(--tt-limits-label-w)" }}
+            >
+              {copy("limits.deepseek.balance_label", { currency })}
+            </span>
+            <span className="text-xs sm:text-sm tabular-nums text-oai-gray-600 dark:text-oai-gray-300">
+              {total}
+            </span>
+            {granted ? (
+              <span className="text-[10.5px] tabular-nums text-oai-gray-400 dark:text-oai-gray-500">
+                {copy("limits.deepseek.granted_detail", { amount: granted })}
+              </span>
+            ) : null}
+          </div>
+        );
+      })}
+      {data?.is_available === false ? (
+        <div className="mt-1">
+          <StatusLine tone="error">{copy("limits.deepseek.unavailable")}</StatusLine>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function renderProviderExtra(kind, data) {
+  if (kind === "deepseek_balance") {
+    return <DeepseekBalanceSection data={data} />;
+  }
   if (kind === "zcode_reset_bank") {
-    return data.reset_credits ? <ZcodeResetBankSection data={data.reset_credits} /> : null;
+    // Hand LimitWindowSection a real null when the bank is spent: a truthy
+    // element that renders nothing would still suppress the no-data line.
+    return zcodeResetBankHasContent(data.reset_credits, Date.now())
+      ? <ZcodeResetBankSection data={data.reset_credits} />
+      : null;
   }
   if (kind === "codex_meta") {
     // Credit amounts show on hover (LimitBar's title) instead of an
@@ -879,6 +956,55 @@ function ZcodeStartPlanSection({ data, mode, now }) {
   );
 }
 
+// Snapshot of the user's other region (issue 938), read from ZCode's own
+// usage logs. ZCode only queries the balance of the region currently in use
+// (issue 959), so while the other region's log rows are inside the scan
+// window TokenTracker also persists them to the disk cache and serves that
+// snapshot here once they age out; the row below shows the data's age.
+function ZcodeOtherRegionSection({ data, mode, now }) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
+  const labelWidth = useWidestLabelWidth(containerRef);
+  const regionName = copy(data.region === "zai" ? "limits.zcode.region.zai" : "limits.zcode.region.bigmodel");
+  const planLabel = data.plan_label || copy("limits.zcode.start_grants");
+  const title = copy("limits.zcode.other_region.title", { region: regionName, plan: planLabel });
+  const rows = PROVIDER_LIMIT_SPECS.zcode.windows(data)
+    .filter((s) => s.window)
+    .map((s) => ({ spec: s, mode, pace: paceForSpec(s, mode, now) }));
+  const snapshotMs = Date.parse(data.log_timestamp);
+  return (
+    <div className="mt-2 border-t border-oai-gray-200/60 pt-2 dark:border-oai-gray-800">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }}
+        onKeyDown={(event) => event.stopPropagation()}
+        className="flex w-full items-center gap-1.5 rounded text-xs text-oai-gray-500 transition-colors hover:text-oai-gray-800 dark:text-oai-gray-400 dark:hover:text-oai-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-oai-brand-500"
+      >
+        <Globe size={13} aria-hidden />
+        <span className="min-w-0 truncate" title={title}>{title}</span>
+        <ChevronDown size={13} aria-hidden className={`ml-auto transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open ? (
+        <div
+          ref={containerRef}
+          data-limit-label-group=""
+          className="mt-2 flex flex-col gap-1.5"
+          style={labelWidth > 0 ? { "--tt-limits-label-w": `${labelWidth}px` } : undefined}
+        >
+          <LimitWindowSection rows={rows} mode={mode} />
+          <LimitDetail rows={rows} mode={mode} now={now} />
+          {Number.isFinite(snapshotMs) ? (
+            <StatusLine>
+              {copy("limits.zcode.other_region.snapshot", { time: formatExactReset(snapshotMs) })}
+            </StatusLine>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function renderConfiguredProvider(id, data, title, mode, expanded, onToggle, badge = null, subscription = null, now = Date.now(), onKeySaved = null) {
   const spec = PROVIDER_LIMIT_SPECS[id];
   if (!spec) return null;
@@ -899,10 +1025,11 @@ function renderConfiguredProvider(id, data, title, mode, expanded, onToggle, bad
       onToggle={onToggle}
       badge={badge}
       rightAdornment={subscription ? <SubscriptionRightBadge subscription={subscription} /> : null}
+      actions={id === "cursor" && data.connection_source === "browser" ? <CursorConnectionControl connected onSaved={onKeySaved} /> : null}
       toggleOnHeader={id === "zcode"}
     >
       <LimitWindowSection mode={mode} rows={rows} extra={extra} expanded={expanded} />
-      {id === "opencodeGo" || id === "commandCode" ? (
+      {id === "opencodeGo" || id === "commandCode" || id === "deepseek" ? (
         <EnvCredentialNotice providerId={id} data={data} onSaved={onKeySaved} />
       ) : null}
       {subscription ? <SubscriptionBar subscription={subscription} now={now} mode={mode} /> : null}
@@ -913,6 +1040,9 @@ function renderConfiguredProvider(id, data, title, mode, expanded, onToggle, bad
       {id === "zcode" && data.start_plan?.configured ? (
         <ZcodeStartPlanSection data={data.start_plan} mode={mode} now={now} />
       ) : null}
+      {id === "zcode" && data.other_region ? (
+        <ZcodeOtherRegionSection data={data.other_region} mode={mode} now={now} />
+      ) : null}
     </ToolGroup>
   );
 }
@@ -921,12 +1051,13 @@ function renderConfiguredProvider(id, data, title, mode, expanded, onToggle, bad
 // fetch error). A linked subscription still belongs to this row: it is
 // user-entered data, so its badge/progress stay visible regardless of the
 // tool's own configuration state.
-function renderUnlinkedProvider(id, statusNodes, expanded, onToggle, subscription = null, now = Date.now(), mode = LIMIT_DISPLAY_MODES.USED) {
+function renderUnlinkedProvider(id, statusNodes, expanded, onToggle, subscription = null, now = Date.now(), mode = LIMIT_DISPLAY_MODES.USED, actions = null) {
   const hasSubscription = Boolean(subscription);
   return (
     <ToolGroup
       key={id}
       name={limitProviderName(id)}
+      actions={actions}
       providerId={id}
       expandable={hasSubscription}
       expanded={expanded}
@@ -946,16 +1077,33 @@ function renderUnlinkedProvider(id, statusNodes, expanded, onToggle, subscriptio
 
 function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = null, now = Date.now(), onKeySaved = null) {
   if (!PROVIDER_LIMIT_SPECS[id]) return null;
+  const connectionActions = id === "cursor"
+    ? <CursorConnectionControl connected={data?.connection_source === "browser"} onSaved={onKeySaved} />
+    : null;
+  if (id === "claude" && data?.limits_status === "not_applicable") {
+    return renderUnlinkedProvider(id,
+      <StatusLine>{copy("limits.claude.custom_backend")}</StatusLine>,
+      expanded, onToggle, subscription, now, mode);
+  }
   if (!data?.configured) {
     return renderUnlinkedProvider(
       id,
       <>
-        <StatusLine>{copy("limits.status.not_connected")}</StatusLine>
+        {id === "cursor" ? (
+          <div className="space-y-2">
+            <div className="space-y-1 text-xs leading-relaxed text-oai-gray-600 dark:text-oai-gray-300">
+              <p>{copy("limits.cursor.connection.description")}</p>
+              <p className="text-oai-gray-500 dark:text-oai-gray-400">{copy("limits.cursor.connection.privacy")}</p>
+            </div>
+            {connectionActions}
+          </div>
+        ) : <StatusLine>{copy("limits.status.not_connected")}</StatusLine>}
         {id === "opencodeGo" ? <SetupHint title={copy("limits.opencodeGo.setupHint.title")}><OpenCodeGoSetupHint onSaved={onKeySaved} /></SetupHint> : null}
         {id === "commandCode" ? <SetupHint title={copy("limits.commandCode.setupHint.title")}><CommandCodeSetupHint onSaved={onKeySaved} /></SetupHint> : null}
         {id === "codingPlan" ? <SetupHint title={copy("limits.codingPlan.setupHint.title")}><ArkCodingPlanSetupHint /></SetupHint> : null}
         {id === "agentPlan" ? <SetupHint title={copy("limits.agentPlan.setupHint.title")}><ArkAgentPlanSetupHint /></SetupHint> : null}
         {id === "devin" ? <SetupHint title={copy("limits.devin.setupHint.title")}><DevinSetupHint /></SetupHint> : null}
+        {id === "deepseek" ? <SetupHint title={copy("limits.deepseek.setupHint.title")}><DeepseekSetupHint onSaved={onKeySaved} /></SetupHint> : null}
       </>,
       expanded,
       onToggle,
@@ -979,10 +1127,12 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
     return renderUnlinkedProvider(
       id,
       <>
-        <StatusLine tone="error">{data.error}</StatusLine>
+        <StatusLine tone="error">{id === "cursor" && data.auth_action_required === "reauth" ? copy("limits.cursor.connection.expired") : data.error}</StatusLine>
         {id === "kiro"
           ? renderProviderExtra(PROVIDER_LIMIT_SPECS.kiro.extra, data)
           : null}
+        {id === "deepseek" ? <SetupHint title={copy("limits.deepseek.setupHint.title")}><DeepseekSetupHint onSaved={onKeySaved} /></SetupHint> : null}
+        {id === "deepseek" ? <EnvCredentialNotice providerId={id} data={data} onSaved={onKeySaved} /> : null}
         {id === "opencodeGo" ? <SetupHint title={copy("limits.opencodeGo.setupHint.title")}><OpenCodeGoSetupHint onSaved={onKeySaved} /></SetupHint> : null}
         {id === "commandCode" ? <SetupHint title={copy("limits.commandCode.setupHint.title")}><CommandCodeSetupHint onSaved={onKeySaved} /></SetupHint> : null}
         {id === "codingPlan" ? <SetupHint title={copy("limits.codingPlan.setupHint.title")}><ArkCodingPlanSetupHint /></SetupHint> : null}
@@ -994,6 +1144,7 @@ function renderProviderGroup(id, data, mode, expanded, onToggle, subscription = 
       subscription,
       now,
       mode,
+      connectionActions,
     );
   }
 
@@ -1300,6 +1451,39 @@ function CommandCodeSetupHint({ onSaved }) {
   );
 }
 
+// DeepSeek (platform.deepseek.com) is pay-as-you-go with no desktop app and
+// no usage API: the official balance endpoint keyed by a plain API key is the
+// only documented programmatic source (issue 960). The key is entered here and
+// stored by the backend in a 0600 file, same flow as OpenCode Go/CommandCode.
+function DeepseekSetupHint({ onSaved }) {
+  return (
+    <div className="mt-3 text-[11px] text-oai-gray-600 dark:text-oai-gray-300">
+      <div className="mt-0.5 leading-snug text-oai-gray-500 dark:text-oai-gray-400">
+        {copy("limits.deepseek.setupHint.subtitle")}
+      </div>
+      <ol className="mt-2.5 space-y-2.5">
+        <HintStep n="1">
+          <div>{copy("limits.deepseek.setupHint.step1")}</div>
+          <a
+            href="https://platform.deepseek.com"
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 inline-flex items-center gap-1 rounded-md bg-oai-brand/10 px-2 py-1 font-medium text-oai-brand hover:bg-oai-brand/15 transition-colors"
+          >
+            {copy("limits.deepseek.setupHint.cta")}
+            <ExternalArrow />
+          </a>
+        </HintStep>
+        <HintStep n="2">
+          <div>{copy("limits.deepseek.setupHint.step2")}</div>
+          <ProviderKeyInput provider="deepseek" onSaved={onSaved} />
+        </HintStep>
+      </ol>
+    </div>
+  );
+}
+
 // Devin quota is read through the Devin CLI's saved sign-in on this machine
 // — the backend reuses the session token the CLI wrote to its credentials
 // file, so all the row needs is the CLI installed and signed in once.
@@ -1490,14 +1674,13 @@ function useWidestLabelWidth(containerRef) {
   return labelWidth;
 }
 
-export function UsageLimitsPanel({ claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin, workbuddy, order, visibility, displayMode, subscriptions = [], showSubscriptions = true, onProviderKeySaved = null }) {
-  const dataById = { claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin, workbuddy };
+export function UsageLimitsPanel({ claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin, workbuddy, workbuddyAi, deepseek, order, visibility, displayMode, subscriptions = [], showSubscriptions = true, onProviderKeySaved = null }) {
+  const dataById = { claude, codex, cursor, gemini, kimi, kiro, grok, antigravity, copilot, zcode, opencodeGo, commandCode, qoder, qoderCn, codingPlan, agentPlan, devin, workbuddy, workbuddyAi, deepseek };
   const containerRef = useRef(null);
   const labelWidth = useWidestLabelWidth(containerRef);
   const [expandedId, setExpandedId] = useState(null);
   const [now, setNow] = useState(() => Date.now());
-  const effectiveOrder = [...new Set((Array.isArray(order) && order.length > 0 ? order : DEFAULT_ORDER)
-    .map((id) => id === "workbuddyAi" ? "workbuddy" : id))];
+  const effectiveOrder = [...new Set(Array.isArray(order) && order.length > 0 ? order : DEFAULT_ORDER)];
   const effectiveMode = displayMode === LIMIT_DISPLAY_MODES.REMAINING
     ? LIMIT_DISPLAY_MODES.REMAINING
     : LIMIT_DISPLAY_MODES.USED;

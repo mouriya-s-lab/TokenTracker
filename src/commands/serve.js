@@ -77,44 +77,17 @@ async function cmdServe(argv) {
     return;
   }
 
-  // 0. First-time setup: if tracker dir doesn't exist, run init first
+  // Resolve paths early so the HTTP listener can bind before first-run init.
+  // Native hosts (Windows especially) probe health with a hard deadline; if we
+  // block on init+first-sync before listen, that deadline kills the child and
+  // the setup never commits cursors.json (#961).
   const { trackerDir, binDir } = await resolveTrackerPaths();
-  if (!fssync.existsSync(path.join(trackerDir, "cursors.json"))) {
-    process.stdout.write("First time? Setting up Token Tracker...\n\n");
-    try {
-      const { cmdInit } = require("./init");
-      await cmdInit(["--yes"]);
-    } catch (e) {
-      process.stdout.write(`Init warning: ${e?.message || e}\n`);
-    }
-  }
 
-  try {
-    const { installLocalTrackerApp, repairRuntimeIntegrations } = require("./init");
-    await installLocalTrackerApp({ appDir: path.join(trackerDir, "app") });
-    const repairResult = await repairRuntimeIntegrations({ trackerDir, binDir, safeMode: true });
-    for (const warning of repairResult?.warnings || []) {
-      process.stdout.write(
-        `Runtime integration repair warning (${warning.integration}): ${warning.error}\n`,
-      );
-    }
-  } catch (e) {
-    process.stdout.write(`Runtime refresh warning: ${e?.message || e}\n`);
-  }
+  // All runtime maintenance and initial sync run after listen. The dashboard
+  // is served from this package, not the hook runtime installed in trackerDir.
+  const needsFirstRunSetup = !fssync.existsSync(path.join(trackerDir, "cursors.json"));
 
-  // 1. Optional sync
-  if (opts.sync) {
-    process.stdout.write("Syncing local data...\n");
-    try {
-      const { cmdSync } = require("./sync");
-      await cmdSync(["--auto"]);
-      process.stdout.write("Sync done.\n");
-    } catch (e) {
-      process.stdout.write(`Sync warning: ${e?.message || e}\n`);
-    }
-  }
-
-  // 2. Resolve paths
+  // Resolve paths
   const queuePath = resolveQueuePath();
   const dashboardDir = resolveDashboardDir();
 
@@ -179,12 +152,13 @@ async function cmdServe(argv) {
       }
 
       // Static files
-      const served = await serveStaticFile(dashboardDir, url.pathname, res, { localRuntimeConfig: true });
+      const acceptEncoding = req.headers["accept-encoding"] || "";
+      const served = await serveStaticFile(dashboardDir, url.pathname, res, { localRuntimeConfig: true, acceptEncoding });
       if (served) return;
 
       // SPA fallback
       if (shouldServeSpaFallback(req, url)) {
-        await serveStaticFile(dashboardDir, "/index.html", res, { localRuntimeConfig: true });
+        await serveStaticFile(dashboardDir, "/index.html", res, { localRuntimeConfig: true, acceptEncoding });
         return;
       }
 
@@ -240,6 +214,45 @@ async function cmdServe(argv) {
 
     if (opts.open) {
       openInBrowser(url);
+    }
+  }
+
+  // A large Windows runtime copy can take tens of seconds. Health probes and
+  // the dashboard must already work while maintenance is in progress.
+  try {
+    const { installLocalTrackerApp, repairRuntimeIntegrations } = require("./init");
+    await installLocalTrackerApp({ appDir: path.join(trackerDir, "app") });
+    const repairResult = await repairRuntimeIntegrations({ trackerDir, binDir, safeMode: true });
+    for (const warning of repairResult?.warnings || []) {
+      process.stdout.write(
+        `Runtime integration repair warning (${warning.integration}): ${warning.error}\n`,
+      );
+    }
+  } catch (e) {
+    process.stdout.write(`Runtime refresh warning: ${e?.message || e}\n`);
+  }
+
+  if (opts.sync && !needsFirstRunSetup) {
+    process.stdout.write("Syncing local data...\n");
+    try {
+      const { cmdSync } = require("./sync");
+      await cmdSync(["--auto"]);
+      process.stdout.write("Sync done.\n");
+    } catch (e) {
+      process.stdout.write(`Sync warning: ${e?.message || e}\n`);
+    }
+  }
+
+  // First-time setup AFTER the listener is accepting health probes. Init still
+  // runs inline (including first sync) so the dashboard fills in, but native
+  // hosts can mark the server Running without racing that sync (#961).
+  if (needsFirstRunSetup) {
+    process.stdout.write("First time? Setting up Token Tracker...\n\n");
+    try {
+      const { cmdInit } = require("./init");
+      await cmdInit(["--yes"]);
+    } catch (e) {
+      process.stdout.write(`Init warning: ${e?.message || e}\n`);
     }
   }
 
@@ -750,7 +763,7 @@ function parseArgs(argv, env = process.env) {
     port: envPort || defaultPort,
     portExplicit: Boolean(envPort),
     wslDefaultPort: !envPort && defaultPort === WSL_DEFAULT_PORT,
-    open: true,
+    open: !["macos", "windows", "linux"].includes(env.TOKENTRACKER_APP_SHELL),
     sync: true,
   };
   for (let i = 0; i < argv.length; i++) {

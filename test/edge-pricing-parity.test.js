@@ -128,6 +128,31 @@ test("Qwen3.8 Max local and all cloud paths share Singapore International rates 
   }
 });
 
+test("Grok 4.7 and Grok 4.7 Build Fast are explicitly priced on the edge too", () => {
+  const { getModelPricing: localPricing } = require("../src/lib/pricing");
+  // Without explicit keys these ids only reached the right numbers through
+  // the "grok-4.7" / "grok-4.7"+fast fuzzy matchers, which would silently
+  // follow any future edit to the Cursor entries instead of these SKUs.
+  const models = ["grok-4.7", "grok-4.7-build-fast"];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of models) {
+      const local = localPricing(model);
+      const edge = JSON.parse(JSON.stringify(edgePricing(model)));
+      assert.equal(edge.input, local.input, `${name}: ${model} input`);
+      assert.equal(edge.output, local.output, `${name}: ${model} output`);
+      assert.equal(edge.cache_read, local.cache_read, `${name}: ${model} cache_read`);
+      assert.equal(edge.cache_write || 0, local.cache_write, `${name}: ${model} cache_write`);
+    }
+  }
+  assert.notEqual(
+    localPricing("grok-4.7-build-fast").input,
+    localPricing("grok-4.7").input,
+    "the Fast SKU must not collapse onto the base grok-4.7 rate",
+  );
+});
+
 test("canonical pricing block retains regression-prone entries and matcher order", () => {
   const block = extractBlock(CANONICAL);
 
@@ -146,6 +171,8 @@ test("canonical pricing block retains regression-prone entries and matcher order
     '"cursor-grok-4.6-fast"',
     '"cursor-grok-4.7"',
     '"cursor-grok-4.7-fast"',
+    '"grok-4.7"',
+    '"grok-4.7-build-fast"',
     '"composer-2.5"',
     '"composer-2.5-fast"',
     '"gemini-4-argon"',
@@ -156,6 +183,13 @@ test("canonical pricing block retains regression-prone entries and matcher order
     '"deepseek-v4.1-flash"',
     '"deepseek-flash"',
     '"claude-haiku-5-5"',
+    // #929: LiteLLM-only models promoted into curated + edge so cloud account
+    // views price them; these entries must never silently disappear again.
+    '"claude-opus-4-5"',
+    '"gpt-5.3-codex-spark"',
+    '"gpt-6-luna"',
+    '"muse-spark-1.2-contributor"',
+    '"muse-spark-1.3-contributor"',
   ]) {
     assert.ok(block.includes(`${key}:`), `canonical table lost ${key}`);
   }
@@ -209,6 +243,137 @@ test("canonical pricing block retains regression-prone entries and matcher order
   // and glm-5.3 must precede glm-5, or flash rows bill at 6.7x.
   order('lower.includes("glm-5.3-flash")', 'lower.includes("glm-5.3")');
   order('lower.includes("glm-5.3")', 'lower.includes("glm-5")');
+});
+
+test("models promoted from LiteLLM-only coverage price identically locally and in all cloud paths (#929)", () => {
+  const { getModelPricing: localPricing } = require("../src/lib/pricing");
+  const cases = [
+    ["gpt-6-luna", { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 }],
+    ["gpt-5.5", { input: 5, output: 30, cache_read: 0.5, cache_write: 0 }],
+    ["gpt-5.4", { input: 2.5, output: 15, cache_read: 0.25, cache_write: 0 }],
+    ["gpt-5.4-mini", { input: 0.75, output: 4.5, cache_read: 0.075, cache_write: 0 }],
+    ["gpt-5.2", { input: 1.75, output: 14, cache_read: 0.175, cache_write: 0 }],
+    ["gpt-5.3-codex-spark", { input: 1.75, output: 14, cache_read: 0.175, cache_write: 0 }],
+    ["claude-opus-4-5", { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 }],
+    ["claude-opus-4-6", { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 }],
+    ["claude-sonnet-4-6", { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 }],
+    ["gemini-3-flash-preview", { input: 0.5, output: 3, cache_read: 0.05, cache_write: 0 }],
+    ["mimo-v2.5", { input: 0.4, output: 2, cache_read: 0.08, cache_write: 0 }],
+    ["mimo-v2.5-pro", { input: 1, output: 3, cache_read: 0.2, cache_write: 0 }],
+    ["muse-spark-1.2-contributor", { input: 0.1, output: 0.2, cache_read: 0.002, cache_write: 0 }],
+    ["muse-spark-1.3-contributor", { input: 0.1, output: 0.2, cache_read: 0.002, cache_write: 0 }],
+  ];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    // Edge entries may omit cache_write; treat a missing field as 0 so the
+    // comparison stays about the rates, not about key presence.
+    const norm = (o) => ({
+      input: o.input || 0,
+      output: o.output || 0,
+      cache_read: o.cache_read || 0,
+      cache_write: o.cache_write || 0,
+    });
+    for (const [model, expected] of cases) {
+      assert.deepEqual(
+        norm(JSON.parse(JSON.stringify(edgePricing(model)))),
+        expected,
+        `${name}: ${model}`,
+      );
+      const local = localPricing(model);
+      for (const field of ["input", "output", "cache_read", "cache_write"]) {
+        assert.equal(local[field] || 0, expected[field], `local ${model}.${field}`);
+      }
+    }
+    // The paid Muse contributor entries must not swallow their -free SKUs.
+    for (const model of [
+      "muse-spark-1.2-contributor-free",
+      "muse-spark-1.3-contributor-free",
+    ]) {
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(edgePricing(model))),
+        { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        `${name}: ${model}`,
+      );
+      assert.equal(localPricing(model).input, 0, `local ${model}`);
+    }
+  }
+});
+
+test("GPT-5.4 Pro snapshots price at the Pro rate locally and in all cloud paths (#929)", () => {
+  const { getModelPricing: localPricing } = require("../src/lib/pricing");
+  const pro = { input: 30, output: 180, cache_read: 3, cache_write: 0 };
+  const norm = (o) => ({
+    input: o.input || 0,
+    output: o.output || 0,
+    cache_read: o.cache_read || 0,
+    cache_write: o.cache_write || 0,
+  });
+  // The qualified dated snapshot is the regression shape: the curated gpt-5.4
+  // contained match used to capture it at the base $2.50/$15 rate before the
+  // LiteLLM reverse lookup reached the Pro SKU, while edge billed 30/180.
+  const variants = ["gpt-5.4-pro", "gpt-5.4-pro-2026-03-05", "openai/gpt-5.4-pro-2026-03-05"];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of variants) {
+      assert.deepEqual(
+        norm(JSON.parse(JSON.stringify(edgePricing(model)))),
+        pro,
+        `${name}: ${model}`,
+      );
+      const local = localPricing(model);
+      for (const field of ["input", "output", "cache_read", "cache_write"]) {
+        assert.equal(local[field] || 0, pro[field], `local ${model}.${field}`);
+      }
+    }
+    // The base SKU stays distinct from Pro.
+    assert.notDeepEqual(
+      JSON.parse(JSON.stringify(edgePricing("gpt-5.4"))),
+      JSON.parse(JSON.stringify(edgePricing("gpt-5.4-pro"))),
+      `${name}: base gpt-5.4 must not bill at the Pro rate`,
+    );
+    assert.equal(localPricing("gpt-5.4").input, 2.5, "local base gpt-5.4");
+  }
+});
+
+test("provider-qualified Muse ids price identically locally and in all cloud paths (zero on both sides today)", () => {
+  // Qualified forms (LiteLLM-style `meta/…`, `opencode_go/…`) are priced on
+  // NEITHER side: the local contained match only runs on the dot-restored form
+  // and the LiteLLM snapshot carries no Muse keys, while edge resolves bare
+  // exact keys only. Production rows (2026-01-01 → 2026-10-31) all report the
+  // bare ids, so both sides agree at zero. Pin the agreement — if a qualified
+  // matcher ever lands, it must land on both sides in the same change.
+  const { getModelPricingInfo } = require("../src/lib/pricing");
+  const zero = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const qualified = [
+    "meta/muse-spark-1.2-contributor",
+    "meta/muse-spark-1.3-contributor",
+    "opencode_go/muse-spark-1.2-contributor",
+  ];
+  for (const name of [CANONICAL, ...MIRRORS]) {
+    const { code } = transformSync(extractBlock(name), { loader: "ts", target: "es2020" });
+    const edgePricing = vm.runInNewContext(`${code}\ngetModelPricing;`);
+    for (const model of qualified) {
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(edgePricing(model))),
+        zero,
+        `${name}: ${model}`,
+      );
+      assert.equal(getModelPricingInfo(model, { source: "muse" }).status, "unpriced", `local ${model}`);
+    }
+    // Qualified free ids end in -free and stay free on both sides.
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(edgePricing("meta/muse-spark-1.2-contributor-free"))),
+      zero,
+      `${name}: qualified free`,
+    );
+    assert.equal(
+      getModelPricingInfo("meta/muse-spark-1.2-contributor-free", { source: "muse" }).status,
+      "free",
+      "local qualified free",
+    );
+  }
 });
 
 test("canonical pricing block retains the complete iFlytek MaaS source table", () => {

@@ -286,6 +286,10 @@ limits.zcode.reset_bank.title,dashboard,LimitsPage,UsageLimitsPanel,label,"Quota
 limits.zcode.reset_bank.count,dashboard,LimitsPage,UsageLimitsPanel,detail,"{{count}} available",,active
 limits.zcode.reset_bank.earliest,dashboard,LimitsPage,UsageLimitsPanel,detail,"Earliest expiry: {{time}}",,active
 limits.zcode.reset_bank.batch,dashboard,LimitsPage,UsageLimitsPanel,detail,"{{time}} ×{{count}}",,active
+limits.zcode.region.zai,dashboard,LimitsPage,UsageLimitsPanel,label,"Z.ai",,active
+limits.zcode.region.bigmodel,dashboard,LimitsPage,UsageLimitsPanel,label,"BigModel",,active
+limits.zcode.other_region.title,dashboard,LimitsPage,UsageLimitsPanel,label,"{{region}} · {{plan}}",,active
+limits.zcode.other_region.snapshot,dashboard,LimitsPage,UsageLimitsPanel,detail,"Snapshot from the ZCode log, {{time}}",,active
 leaderboard.range,dashboard,LeaderboardPage,LeaderboardPage,range,"UTC {{period}} · {{from}} – {{to}}",,active
 leaderboard.range_loading,dashboard,LeaderboardPage,LeaderboardPage,range_loading,"UTC {{period}} · …",,active
 leaderboard.range.total,dashboard,LeaderboardPage,LeaderboardPage,range_total,"All time",,active
@@ -721,6 +725,19 @@ usage.overview.percent_below_threshold,ui,DashboardPage,UsageOverview,percent_be
 usage.overview.expand,ui,DashboardPage,UsageOverview,expand,"expand",,active
 usage.overview.collapse,ui,DashboardPage,UsageOverview,collapse,"collapse",,active
 usage.overview.model_count,ui,DashboardPage,UsageOverview,model_count,"{{count}} models",,active
+usage.overview.request_count,ui,DashboardPage,UsageOverview,request_count,"{{count}} requests",,active
+usage.overview.tier_standard,ui,DashboardPage,UsageOverview,tier_standard,"Standard",,active
+usage.overview.tier_fast,ui,DashboardPage,UsageOverview,tier_fast,"Fast",,active
+usage.overview.tier_ultrafast,ui,DashboardPage,UsageOverview,tier_ultrafast,"Ultrafast",,active
+usage.overview.tier_rate_label,ui,DashboardPage,UsageOverview,tier_rate_label,"{{label}} ({{rate}}×)",,active
+usage.overview.request_only_item,ui,DashboardPage,UsageOverview,request_only_item,"{{label}} · {{count}} requests",,active
+usage.overview.request_only_note,ui,DashboardPage,UsageOverview,request_only_note,"Active without token data: {{items}}. Per-model detail in All models.",,active
+usage.overview.scope_account,ui,DashboardPage,UsageOverview,scope_account,"Account-wide",,active
+usage.overview.scope_account_tip,ui,DashboardPage,UsageOverview,scope_account_tip,"Totals from every device synced to your account, not just this machine.",,active
+usage.overview.scope_local,ui,DashboardPage,UsageOverview,scope_local,"This device",,active
+usage.overview.scope_local_tip,ui,DashboardPage,UsageOverview,scope_local_tip,"Showing this machine only. Cloud sync keeps running in the background — switching does not pause uploads.",,active
+usage.overview.scope_switch_aria,ui,DashboardPage,UsageOverview,scope_switch_aria,"Data scope",,active
+usage.overview.request_only_separator,ui,DashboardPage,UsageOverview,request_only_separator,", ",,active
 usage.overview.model_details_aria,ui,DashboardPage,UsageOverview,model_details_aria,"{{provider}} model details",,active
 usage.overview.all_tools,ui,DashboardPage,UsageOverview,all_tools,"All",,active
 usage.overview.all_models,ui,DashboardPage,UsageOverview,all_models,"All models",,active
@@ -732,8 +749,6 @@ usage.overview.antigravity_notice_title,ui,DashboardPage,UsageOverview,antigravi
 usage.overview.antigravity_notice_body,ui,DashboardPage,UsageOverview,antigravity_notice_body,"Exact token usage and prompt-cache hits are parsed from Antigravity session metadata when available. Fallback transcripts without metadata are estimated from text length (~4 chars/token).",,active
 usage.overview.devin_notice_title,ui,DashboardPage,UsageOverview,devin_notice_title,"Cost not estimated",,active
 usage.overview.devin_notice_body,ui,DashboardPage,UsageOverview,devin_notice_body,"Devin reports real local token counts, but swe-2, swe-2-high and compactor have no pricing data in this build, so they are excluded from dollar estimates. A $0 figure does not mean the usage was free.",,active
-usage.overview.trae_notice_title,ui,DashboardPage,UsageOverview,trae_notice_title,"TRAE cost is partial",,active
-usage.overview.trae_notice_body,ui,DashboardPage,UsageOverview,trae_notice_body,"In multi-step turns, TRAE splits cached input for the final step, not the earlier ones. Input without a cache split counts toward token totals but not toward cost. Costs use model prices, not billed amounts.",,active
 usage.overview.week_cross_month_hint,ui,DashboardPage,UsageOverview,week_cross_month_hint,"This week spans two calendar months, so its total is not directly comparable with a single month's usage",,active
 limits.panel.title,ui,LimitsPage,UsageLimitsPanel,title,"Usage Limits",,active
 limits.panel.mode_separator,ui,LimitsPage,UsageLimitsPanel,title_separator," · ",,active
@@ -1268,6 +1283,7 @@ limits.label.opencode_go_weekly,ui,LimitsPage,UsageLimitsPanel,opencode_go_weekl
 limits.label.opencode_go_monthly,ui,LimitsPage,UsageLimitsPanel,opencode_go_monthly,"Monthly",,active
 limits.provider.qoder,ui,LimitsPage,UsageLimitsPanel,provider_qoder,"Qoder",,active
 limits.label.qoder_credits,ui,LimitsPage,UsageLimitsPanel,qoder_credits,"Credits",,active
+limits.label.qoder_addon_credits,ui,LimitsPage,UsageLimitsPanel,qoder_addon_credits,"Add-on Credits",,active
 limits.label.qoder_ultimate,ui,LimitsPage,UsageLimitsPanel,qoder_ultimate,"Ultimate Free Calls",,active
 limits.provider.qoder_cn,ui,LimitsPage,UsageLimitsPanel,provider_qoder_cn,"Qoder CN",,active
 limits.label.qoder_cn_credits,ui,LimitsPage,UsageLimitsPanel,qoder_cn_credits,"Credits",,active
@@ -1647,6 +1663,16 @@ limits.provider.devin,ui,LimitsPage,UsageLimitsPanel,provider_devin,"Devin",,act
 limits.provider.workbuddy,ui,LimitsPage,UsageLimitsPanel,provider_workbuddy,"WorkBuddy",,active
 limits.provider.workbuddy_ai,ui,LimitsPage,UsageLimitsPanel,provider_workbuddy_ai,"WorkBuddy AI",,active
 limits.label.workbuddy_plan,ui,LimitsPage,UsageLimitsPanel,workbuddy_plan,"Plan",,active
+limits.label.workbuddy_addon,ui,LimitsPage,UsageLimitsPanel,workbuddy_addon,Add-on Credits,,active
+limits.deepseek.balance_label,ui,LimitsPage,UsageLimitsPanel,deepseek_balance_label,"Balance ({{currency}})",,active
+limits.deepseek.granted_detail,ui,LimitsPage,UsageLimitsPanel,deepseek_granted_detail,"incl. grant {{amount}}",,active
+limits.deepseek.unavailable,ui,LimitsPage,UsageLimitsPanel,deepseek_unavailable,"DeepSeek reports this account as unavailable — the balance may be exhausted or the account under review.",,active
+limits.deepseek.setupHint.title,ui,LimitsPage,UsageLimitsPanel,deepseek_hint_title,"Connect DeepSeek",,active
+limits.deepseek.setupHint.subtitle,ui,LimitsPage,UsageLimitsPanel,deepseek_hint_subtitle,"DeepSeek is pay-as-you-go: TokenTracker shows the prepaid balance from the official API — there are no usage windows.",,active
+limits.deepseek.setupHint.step1,ui,LimitsPage,UsageLimitsPanel,deepseek_hint_step1,"Create an API key in the DeepSeek platform console.",,active
+limits.deepseek.setupHint.cta,ui,LimitsPage,UsageLimitsPanel,deepseek_hint_cta,"Open platform.deepseek.com",,active
+limits.deepseek.setupHint.step2,ui,LimitsPage,UsageLimitsPanel,deepseek_hint_step2,"Paste the API key (it starts with sk-). TokenTracker uses it only for balance requests.",,active
+limits.provider.deepseek,ui,LimitsPage,UsageLimitsPanel,provider_deepseek,"DeepSeek",,active
 limits.label.devin_daily,ui,LimitsPage,UsageLimitsPanel,devin_daily,"Daily",,active
 limits.label.devin_weekly,ui,LimitsPage,UsageLimitsPanel,devin_weekly,"Weekly",,active
 limits.devin.setupHint.title,ui,LimitsPage,UsageLimitsPanel,devin_hint_title,"Connect Devin",,active
@@ -2144,3 +2170,16 @@ settings.local_data.local_history_only,dashboard,DashboardPage,LocalDataSection,
 leaderboard.profile_modal.window.lifetime,dashboard,LeaderboardProfileModal,StatCards,lifetime,"Totals: all time. Active days, daily average and breakdowns: {{from}} to {{to}}.",,active
 leaderboard.profile_modal.window.period,dashboard,LeaderboardProfileModal,StatCards,period,Stats: {{from}} to {{to}}.,,active
 leaderboard.profile_modal.window.average,dashboard,LeaderboardProfileModal,StatCards,average,"Window cost divided by {{days}} calendar days, including days without usage.",,active
+limits.claude.custom_backend,ui,LimitsPage,UsageLimitsPanel,status,Custom backend — Anthropic limits not applicable,,active
+limits.cursor.connection.connect,dashboard,LimitsPage,CursorConnectionControl,connect,Connect,,active
+limits.cursor.connection.reconnect,dashboard,LimitsPage,CursorConnectionControl,reconnect,Reconnect Cursor,,active
+limits.cursor.connection.disconnect,dashboard,LimitsPage,CursorConnectionControl,disconnect,Disconnect,,active
+limits.cursor.connection.open,dashboard,LimitsPage,CursorConnectionControl,open,Open sign-in,,active
+limits.cursor.connection.cancel,dashboard,LimitsPage,CursorConnectionControl,cancel,Cancel,,active
+limits.cursor.connection.waiting,dashboard,LimitsPage,CursorConnectionControl,waiting,Waiting…,,active
+limits.cursor.connection.expired,dashboard,LimitsPage,CursorConnectionControl,expired,Cursor connection expired. Connect again to refresh usage.,,active
+limits.cursor.connection.failed,dashboard,LimitsPage,CursorConnectionControl,failed,Could not connect to Cursor. Try signing in again.,,active
+limits.cursor.connection.manage,dashboard,LimitsPage,CursorConnectionControl,manage,Cursor connection,,active
+limits.cursor.connection.retry,dashboard,LimitsPage,CursorConnectionControl,retry,Retry connection,,active
+limits.cursor.connection.description,dashboard,LimitsPage,CursorConnectionControl,description,Cursor encrypts its saved sign-in. Connect on Cursor's website to read your usage and limits.,,active
+limits.cursor.connection.privacy,dashboard,LimitsPage,CursorConnectionControl,privacy,Your sign-in credentials stay on this device and are never sent to TokenTracker servers.,,active

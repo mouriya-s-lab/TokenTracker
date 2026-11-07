@@ -74,8 +74,7 @@ function defaultVisibility() {
 function normalizeOrder(value) {
   const known = [];
   if (Array.isArray(value)) {
-    for (const rawId of value) {
-      const id = rawId === "workbuddyAi" ? "workbuddy" : rawId;
+    for (const id of value) {
       if (ALL_LIMIT_PROVIDERS.includes(id) && !known.includes(id)) {
         known.push(id);
       }
@@ -95,8 +94,11 @@ function normalizeVisibility(value) {
   for (const id of ALL_LIMIT_PROVIDERS) {
     if (typeof value[id] === "boolean") merged[id] = value[id];
   }
-  if (typeof value.workbuddyAi === "boolean") {
-    merged.workbuddy = value.workbuddy === true || value.workbuddyAi;
+  // The unified-row era folded both editions into one `workbuddy` switch.
+  // Without an explicit stored AI value the AI row inherits that switch, so
+  // nobody's WorkBuddy rows silently vanish (or reappear) across the split.
+  if (typeof value.workbuddyAi !== "boolean" && typeof value.workbuddy === "boolean") {
+    merged.workbuddyAi = value.workbuddy;
   }
   return merged;
 }
@@ -166,6 +168,31 @@ export function isLimitsPrefsStorageKey(key) {
  */
 export function isDevinProviderSelected() {
   return readVisibility().devin === true;
+}
+
+/**
+ * Ordered ids the user currently keeps visible — the display-layer fact the
+ * usage-limits request forwards so hidden providers are not fetched at all
+ * (issue 956). Hidden rows backed by a hand-entered subscription still render and
+ * must be re-added by the caller before gating the fetch (see LimitsPage).
+ */
+export function visibleProviderIds() {
+  const snapshot = readLocalSnapshot();
+  return snapshot.providerOrder.filter((id) => snapshot.providerVisibility[id] !== false);
+}
+
+/**
+ * Inverse of {@link visibleProviderIds}: ids to gate out of the next
+ * usage-limits fetch. Devin is NOT included — its opt-in flag
+ * ({@link isDevinProviderSelected}) remains the single fact gating it, per
+ * the OPT_IN_PROVIDERS precedent, so a default profile sends no hidden list
+ * at all and keeps the legacy no-auth-header request shape.
+ */
+export function hiddenProviderIds() {
+  const snapshot = readLocalSnapshot();
+  return snapshot.providerOrder.filter(
+    (id) => id !== "devin" && snapshot.providerVisibility[id] === false,
+  );
 }
 
 function readDisplayMode() {
