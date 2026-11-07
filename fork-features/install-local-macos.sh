@@ -5,6 +5,8 @@
 #
 # The app must not be managed by the Homebrew cask, and its in-app silent
 # auto-update must stay off, or either replaces the patched runtime.
+# The ad-hoc re-sign gives the app a new identity: macOS asks again for
+# removable-volume access (~/Ext is a separate volume); scans block until allowed.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
