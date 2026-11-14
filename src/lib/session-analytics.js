@@ -2441,7 +2441,6 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
   // vanished mid-scan). Swallowing these silently made sessions disappear with
   // no signal at all; count them so the API can say so.
   let skippedFiles = 0;
-  let incompleteCodexUsage = false;
   let incompleteZcodeScan = false;
   let incompleteOpencodeScan = false;
   let incompleteKimiScan = false;
@@ -2452,7 +2451,6 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
     const statKey = analyticsEntryStatKey(entry.source, entry.filePath);
     if (!statKey) {
       skippedFiles += 1;
-      if (entry.source === "codex") incompleteCodexUsage = true;
       if (entry.source === "zcode") incompleteZcodeScan = true;
       if (entry.source === "opencode") incompleteOpencodeScan = true;
       if (entry.source === "kimi") incompleteKimiScan = true;
@@ -2496,7 +2494,6 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
         // One active/partial session must not poison the sidecar, but do not
         // pretend it never existed either.
         skippedFiles += 1;
-        if (entry.source === "codex") incompleteCodexUsage = true;
         if (entry.source === "zcode") incompleteZcodeScan = true;
         if (entry.source === "opencode") incompleteOpencodeScan = true;
         if (entry.source === "kimi") incompleteKimiScan = true;
@@ -2560,7 +2557,11 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
     const generatedAt = new Date().toISOString();
     await writeAtomic(metaPath, `${JSON.stringify({
       version: SIDECAR_VERSION,
-      codex_usage_version: incompleteCodexUsage ? 0 : CODEX_USAGE_VERSION,
+      // Every codex row written here came from the current parser; a skipped
+      // codex group has no row and no file entry, so the next build retries it
+      // alone. Marking the whole cache stale for one unreadable archive would
+      // bypass the TTL, the signature check and per-file reuse on every build.
+      codex_usage_version: CODEX_USAGE_VERSION,
       signature,
       generated_at: generatedAt,
       checked_at: generatedAt,
