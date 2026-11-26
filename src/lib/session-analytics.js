@@ -2682,10 +2682,6 @@ async function buildSessionAnalyticsInternal({ home = os.homedir(), force = fals
     const generatedAt = new Date().toISOString();
     await writeAtomic(metaPath, `${JSON.stringify({
       version: SIDECAR_VERSION,
-      // Every codex row written here came from the current parser; a skipped
-      // codex group has no row and no file entry, so the next build retries it
-      // alone. Marking the whole cache stale for one unreadable archive would
-      // bypass the TTL, the signature check and per-file reuse on every build.
       codex_usage_version: CODEX_USAGE_VERSION,
       signature,
       generated_at: generatedAt,

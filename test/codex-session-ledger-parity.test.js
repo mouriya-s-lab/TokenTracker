@@ -56,10 +56,8 @@ test("an unreadable Codex archive does not invalidate the cached Codex rows",asy
     const rows=(await fs.readFile(queue,"utf8")).trim().split("\n").map(JSON.parse);
     for(const row of rows)if(row.source==="codex")row.total_tokens=999;
     await fs.writeFile(queue,rows.map(r=>JSON.stringify(r)+"\n").join(""));
-    // Within the TTL the sidecar is served as-is; a rebuild would re-derive 10.
     const cached=await buildSessionAnalytics({home});
     assert.equal(cached.find(r=>r.source==="codex").total_tokens,999);
-    // A refresh retries the unreadable archive but reuses the unchanged file's row.
     const refreshed=await buildSessionAnalytics({home,recheck:true});
     assert.equal(refreshed.find(r=>r.source==="codex").total_tokens,999);assert.equal(refreshed.skippedFiles,1);
   }finally{await fs.rm(home,{recursive:true,force:true});}

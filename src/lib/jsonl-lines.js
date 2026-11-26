@@ -8,10 +8,6 @@
  * Records longer than maxRecordBytes content bytes (excluding LF) are reported
  * as { line: null, utf8Valid: null, oversized: true } without being buffered
  * beyond the limit or decoded.
- * With `mustContain` (a byte sequence), LF-terminated records that do not
- * contain it are reported as { line: null, utf8Valid: null, oversized: false }
- * without being decoded. A final unterminated record is always decoded: it may
- * still be mid-write and not yet contain the bytes.
  */
 class PhysicalJsonlLimitError extends Error {
   constructor(maxPhysicalBytes) {

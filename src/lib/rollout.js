@@ -17039,10 +17039,6 @@ function ompEntryTimestampMs(msg, entry) {
 // records are orders of magnitude smaller.
 const OMP_LIKE_MAX_RECORD_BYTES = 64 * 1024 * 1024;
 
-// Only assistant records with a `usage` object carry tokens, and oh-my-pi
-// writes them with JSON.stringify, so the key appears verbatim. Tool results
-// and forked-subagent copies of the parent conversation are most of the bytes;
-// skipping records without the key avoids decoding and parsing them.
 const OMP_USAGE_KEY_BYTES = Buffer.from('"usage"');
 
 async function scanOmpLikeTranscript(filePath, startOffset, maxRecordBytes, onEntry, { mustContain = null, recoverReadErrors = false } = {}) {
@@ -17189,27 +17185,27 @@ async function parseOmpLikeIncremental({
       // First line of each file is type:"session" (header) — skip all
       // non-message records.
       if (!entry || entry.type !== "message") return;
-    
+
       // Only assistant messages carry token usage.
       const msg = entry.message;
       if (!msg || msg.role !== "assistant") return;
-    
+
       const usage = msg.usage;
       if (!usage || typeof usage !== "object") return;
-    
+
       // Dedup by top-level entry id (8-char string assigned by oh-my-pi).
       const entryId = typeof entry.id === "string" && entry.id ? entry.id : null;
       if (!entryId) return;
       if (seenIds.has(entryId)) return;
-    
+
       recordsProcessed++;
-    
+
       const input = toNonNegativeInt(usage.input);
       const output = toNonNegativeInt(usage.output);
       const cacheRead = toNonNegativeInt(usage.cacheRead);
       const cacheWrite = toNonNegativeInt(usage.cacheWrite);
       const reasoningTokens = pickUsageInt(usage, reasoningFields);
-    
+
       if (
         input === 0 &&
         output === 0 &&
@@ -17220,7 +17216,7 @@ async function parseOmpLikeIncremental({
         seenIds.add(entryId);
         return;
       }
-    
+
       // Entries with no resolvable timestamp are skipped — they cannot be
       // placed in a bucket.
       const tsMs = ompEntryTimestampMs(msg, entry);
@@ -17228,11 +17224,11 @@ async function parseOmpLikeIncremental({
         seenIds.add(entryId);
         return;
       }
-    
+
       const tsIso = new Date(tsMs).toISOString();
       const bucketStart = toUtcHalfHourStart(tsIso);
       if (!bucketStart) return;
-    
+
       // Use provided totalTokens when available; otherwise sum all components.
       // OmO folds reasoning into output, so the fallback must not add it again.
       const totalTokens =
@@ -17240,9 +17236,9 @@ async function parseOmpLikeIncremental({
           ? toNonNegativeInt(usage.totalTokens)
           : input + output + cacheRead + cacheWrite +
             (reasoningIncludedInOutput ? 0 : reasoningTokens);
-    
+
       const model = normalizeModelInput(msg.model) || fallbackModel;
-    
+
       const delta = {
         input_tokens: input,
         cached_input_tokens: cacheRead,
@@ -17252,13 +17248,13 @@ async function parseOmpLikeIncremental({
         total_tokens: totalTokens,
         conversation_count: 1,
       };
-    
+
       const bucket = getHourlyBucket(hourlyState, source, model, bucketStart);
       addTotals(bucket.totals, delta);
       touchedBuckets.add(bucketKey(source, model, bucketStart));
       seenIds.add(entryId);
       eventsAggregated++;
-    
+
       if (cb) {
         cb({
           index: fileIdx + 1,
@@ -17313,10 +17309,10 @@ async function parseOmpLikeIncremental({
           const msg = entry?.type === "message" ? entry.message : null;
           const usage = msg?.role === "assistant" ? msg.usage : null;
           if (!usage || typeof usage !== "object") return;
-        
+
           const entryId = typeof entry.id === "string" && entry.id ? entry.id : null;
           if (!entryId || projectSeenIds.has(entryId)) return;
-        
+
           const input = toNonNegativeInt(usage.input);
           const output = toNonNegativeInt(usage.output);
           const cacheRead = toNonNegativeInt(usage.cacheRead);
@@ -17332,7 +17328,7 @@ async function parseOmpLikeIncremental({
             projectSeenIds.add(entryId);
             return;
           }
-        
+
           const tsMs = ompEntryTimestampMs(msg, entry);
           const bucketStart = tsMs == null
             ? null
@@ -17341,7 +17337,7 @@ async function parseOmpLikeIncremental({
             projectSeenIds.add(entryId);
             return;
           }
-        
+
           const totalTokens =
             Number.isFinite(Number(usage.totalTokens)) && Number(usage.totalTokens) > 0
               ? toNonNegativeInt(usage.totalTokens)

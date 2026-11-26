@@ -15,9 +15,6 @@ const { resolveOmpAgentDir, resolveOmpSubagentFiles } = require("./rollout");
 // Same ceiling as the hourly OMP parser: tool results can be enormous and must
 // not be buffered/decoded when they cannot carry usage.
 const OMP_MAX_RECORD_BYTES = 64 * 1024 * 1024;
-// Transcripts are tens of GB in aggregate; the 64 KiB stream default leaves
-// the scan waiting on I/O round-trips for most of its wall time.
-const OMP_READ_CHUNK_BYTES = 1024 * 1024;
 
 const EDIT_TOOLS = new Set([
   "apply_patch",
@@ -275,7 +272,7 @@ async function readOmpSessionFiles(mainFiles, { seenEntryIds = new Set() } = {})
       turnModel = "omp-unknown";
       let input;
       try {
-        input = fs.createReadStream(filePath, { highWaterMark: OMP_READ_CHUNK_BYTES });
+        input = fs.createReadStream(filePath);
       } catch (error) {
         throw ompInventoryIncomplete(filePath, error);
       }
