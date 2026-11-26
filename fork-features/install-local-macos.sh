@@ -21,6 +21,9 @@ if brew list --cask tokentracker >/dev/null 2>&1; then
 fi
 defaults write com.tokentracker.bar UpdateChecker.autoUpdateEnabled -bool false
 
+export VITE_INSFORGE_BASE_URL="${VITE_INSFORGE_BASE_URL:-https://srctyff5.us-east.insforge.app}"
+export VITE_INSFORGE_ANON_KEY="${VITE_INSFORGE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OC0xMjM0LTU2NzgtOTBhYi1jZGVmMTIzNDU2NzgiLCJlbWFpbCI6ImFub25AaW5zZm9yZ2UuY29tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNDU5NDd9.T0auta_IrVIh0uXW1bob5QSnzvsnJmN28r5XkSGEuQY}"
+
 cd "$REPO"
 npm --prefix dashboard ci --silent
 npm run dashboard:build
