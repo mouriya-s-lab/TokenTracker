@@ -14,6 +14,12 @@ const { multiInstallParse, mergeBothFileSources } = require("../lib/multi-instal
 const { resolveDumateDbPaths, parseDumateIncremental } = require("../lib/dumate");
 const wsl = require("../lib/wsl-probe");
 const {
+  T3_ANTIGRAVITY_REL,
+  discoverT3AntigravityBrainDirs,
+  hostDiscoveryIncomplete,
+  mergeAntigravityInventories,
+} = require("../lib/antigravity-discovery");
+const {
   ensureDir,
   readJson,
   writeJson,
@@ -98,6 +104,8 @@ const {
   piAgentDirCollidesWithOmp,
   resolvePrimeAgentSessionFiles,
   parsePrimeAgentIncremental,
+  resolveDeepaiCodeSessionFiles,
+  parseDeepaiCodeIncremental,
   resolveMinimaxCodeSessionFiles,
   parseMinimaxCodeIncremental,
   resolveCraftSessionFiles,
@@ -178,8 +186,9 @@ const UPLOAD_BUDGET_MS = 90_000;
 const { maybeSendHeartbeat } = require("../lib/telemetry");
 const {
   isCursorInstalled,
-  extractCursorSessionToken,
+  extractCursorAuth,
   fetchCursorUsageCsv,
+  fetchCursorGrokBotUsage,
   parseCursorCsv,
 } = require("../lib/cursor-config");
 const { purgeProjectUsage } = require("../lib/project-usage-purge");
@@ -362,6 +371,7 @@ const AUTO_SYNC_SOURCES = new Set([
   "droid",
   "dumate",
   "dsh",
+  "deepai",
   "every-code",
   "gemini",
   "goose",
@@ -1315,31 +1325,43 @@ async function cmdSync(argv, context = {}) {
 
     let antigravityFiles = [];
     let antigravityInventoryComplete = true;
-    if (sourceAllowed("antigravity") && geminiPaths) {
+    if (sourceAllowed("antigravity")) {
       const knownAntigravityFiles = new Set(
         Object.keys(cursors.files || {}).filter((filePath) => resolveAntigravityDbPath(filePath)),
       );
+      const extraT3Parents = [];
+      if (process.platform === "win32" && wsl.shouldProbeWsl(process.env)) {
+        const wslT3Home = wsl.discoverWslHome(".t3");
+        if (wslT3Home) {
+          // discoverWslHome(".t3") already returns the T3 state root.
+          extraT3Parents.push(path.join(wslT3Home, T3_ANTIGRAVITY_REL));
+        }
+      }
+      const hostDiscovery = await discoverT3AntigravityBrainDirs({
+        home,
+        env: process.env,
+        parents: extraT3Parents,
+      });
       const fileSets = [];
-      if (geminiPaths.native) {
+      if (geminiPaths?.native) {
         fileSets.push(
           await listAntigravityTranscriptsWithStatus(geminiPaths.native, knownAntigravityFiles),
         );
       }
-      if (geminiPaths.wsl) {
+      if (geminiPaths?.wsl) {
         fileSets.push(
           await listAntigravityTranscriptsWithStatus(geminiPaths.wsl, knownAntigravityFiles),
         );
       }
-      antigravityInventoryComplete = fileSets.every((set) => set.complete);
-      const seen = new Set();
-      for (const set of fileSets) {
-        for (const f of set.files) {
-          if (!seen.has(f)) {
-            seen.add(f);
-            antigravityFiles.push(f);
-          }
-        }
+      if (hostDiscovery.brainDirs.length > 0 || hostDiscoveryIncomplete(hostDiscovery.reports, knownAntigravityFiles)) {
+        fileSets.push(
+          await listAntigravityTranscriptsWithStatus(null, knownAntigravityFiles, hostDiscovery.brainDirs),
+        );
       }
+      antigravityInventoryComplete =
+        fileSets.every((set) => set.complete) &&
+        !hostDiscoveryIncomplete(hostDiscovery.reports, knownAntigravityFiles);
+      antigravityFiles = mergeAntigravityInventories(fileSets, knownAntigravityFiles);
     }
     let antigravityResult = { filesProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
     if (antigravityFiles.length > 0) {
@@ -2219,7 +2241,7 @@ async function cmdSync(argv, context = {}) {
 
     let cursorResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
     const cursorInstalled = cursorSyncDeps.isInstalled || isCursorInstalled;
-    const cursorAuthExtractor = cursorSyncDeps.extractAuth || extractCursorSessionToken;
+    const cursorAuthExtractor = cursorSyncDeps.extractAuth || extractCursorAuth;
     const cursorUsageFetcher = cursorSyncDeps.fetchUsageCsv || fetchCursorUsageCsv;
     if (sourceAllowed("cursor") && cursorInstalled({ home, trackerDir })) {
       const cursorAuth = cursorAuthExtractor({ home, trackerDir });
@@ -2228,9 +2250,19 @@ async function cmdSync(argv, context = {}) {
           if (progress?.enabled) {
             progress.start(`Fetching Cursor usage...`);
           }
-          const csvText = await cursorUsageFetcher({ cookie: cursorAuth.cookie });
-          const records = parseCursorCsv(csvText);
-          if (records.length > 0) {
+          const untilMs = Date.now();
+          const hourMs = 60 * 60 * 1000;
+          const oldest = untilMs - 7 * 24 * hourMs;
+          const priorFetch = cursors.cursorApi?.grokBotSyncedThrough || 0;
+          const sinceMs = Math.floor(Math.max(oldest, priorFetch - 2 * hourMs) / hourMs) * hourMs;
+          const grokBotFetcher = cursorSyncDeps.fetchGrokBotUsage || fetchCursorGrokBotUsage;
+          const [csv, bots] = await Promise.allSettled([
+            cursorUsageFetcher({ cookie: cursorAuth.cookie }),
+            cursorAuth.accessToken ? grokBotFetcher({ accessToken: cursorAuth.accessToken, sinceMs, untilMs }) : null,
+          ]);
+          const records = csv.status === "fulfilled" ? parseCursorCsv(csv.value) : [];
+          const grokBotRecords = bots.status === "fulfilled" ? bots.value || [] : [];
+          if (records.length || grokBotRecords.length) {
             if (progress?.enabled) {
               progress.start(
                 `Parsing Cursor ${renderBar(0)} 0/${formatNumber(records.length)} records | buckets 0`,
@@ -2238,6 +2270,7 @@ async function cmdSync(argv, context = {}) {
             }
             cursorResult = await parseCursorApiIncremental({
               records,
+              grokBotRecords,
               cursors,
               queuePath,
               onProgress: (p) => {
@@ -2252,6 +2285,11 @@ async function cmdSync(argv, context = {}) {
               source: "cursor",
             });
           }
+          if (bots.status === "fulfilled" && bots.value) {
+            if (!cursors.cursorApi) cursors.cursorApi = {};
+            cursors.cursorApi.grokBotSyncedThrough = untilMs;
+          }
+          if (csv.status === "rejected" && !grokBotRecords.length) throw csv.reason;
         } catch (err) {
           if (!opts.auto) {
             process.stderr.write(`Cursor sync: ${err.message}\n`);
@@ -2873,6 +2911,36 @@ async function cmdSync(argv, context = {}) {
       }
     }
 
+    // ── DeepAI Code — passive reader for the pi-style sessions it embeds
+    // (~/.deepai-code/userdata/deepai/pi/*/sessions/**/*.jsonl) ──
+    let deepaiResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0, projectBucketsQueued: 0 };
+    const deepaiFiles = sourceAllowed("deepai")
+      ? mergeBothFileSources({ resolveFiles: resolveDeepaiCodeSessionFiles, env: process.env })
+      : [];
+    if (deepaiFiles.length > 0) {
+      if (progress?.enabled) {
+        progress.start(`Parsing DeepAI Code ${renderBar(0)} | buckets 0`);
+      }
+      try {
+        deepaiResult = await parseDeepaiCodeIncremental({
+          sessionFiles: deepaiFiles,
+          cursors,
+          queuePath,
+          projectQueuePath,
+          env: process.env,
+          onProgress: (p) => {
+            if (!progress?.enabled) return;
+            const pct = p.total > 0 ? p.index / p.total : 1;
+            progress.update(
+              `Parsing DeepAI Code ${renderBar(pct)} ${formatNumber(p.index)}/${formatNumber(p.total)} files | buckets ${formatNumber(p.bucketsQueued)}`,
+            );
+          },
+        });
+      } catch (err) {
+        warnProviderParseFailure("DeepAI Code", err, opts);
+      }
+    }
+
     // ── Prime Agent — passive ~/.prime/agent/sessions/*.jsonl usage reader ──
     let primeAgentResult = { recordsProcessed: 0, eventsAggregated: 0, bucketsQueued: 0 };
     const primeAgentFiles = sourceAllowed("prime-agent")
@@ -3450,6 +3518,7 @@ async function cmdSync(argv, context = {}) {
       omoResult.recordsProcessed +
       piResult.recordsProcessed +
       primeAgentResult.recordsProcessed +
+      deepaiResult.recordsProcessed +
       minimaxCodeResult.recordsProcessed +
       craftResult.recordsProcessed +
       reasonixResult.recordsProcessed +
@@ -3498,6 +3567,7 @@ async function cmdSync(argv, context = {}) {
       omoResult.bucketsQueued +
       piResult.bucketsQueued +
       primeAgentResult.bucketsQueued +
+      deepaiResult.bucketsQueued +
       minimaxCodeResult.bucketsQueued +
       craftResult.bucketsQueued +
       reasonixResult.bucketsQueued +
@@ -3534,6 +3604,7 @@ async function cmdSync(argv, context = {}) {
       !workbuddyAiResult.projectCursorUpdated &&
       !(grokResult.projectBucketsQueued > 0) &&
       !(commandCodeResult.projectBucketsQueued > 0) &&
+      !(deepaiResult.projectBucketsQueued > 0) &&
       !commandCodeResult.schemaMigrated &&
       !codexColdAuditDue &&
       !codexFallbackRetryRan &&
@@ -4443,6 +4514,7 @@ async function drainQueueToCloud({ baseUrl, anonKey, deviceToken, queuePath, que
   let skipped = 0;
   let batches = 0;
   let cloudAccess = null;
+  let coverageSupported = false;
   const uploadId = crypto.randomUUID();
   const deadline = Date.now() + maxDurationMs;
   let batchBudget = Math.min(maxBatches, 100);
@@ -4481,6 +4553,25 @@ async function drainQueueToCloud({ baseUrl, anonKey, deviceToken, queuePath, que
       if (anonKey) headers.apikey = anonKey;
       // Re-read after parsing/each batch so switching off stops an active drain.
       if (!canUpload()) break;
+      const needsCoverage = result.buckets.some(bucket => bucket.cost_coverage != null);
+      if (needsCoverage && !coverageSupported) {
+        const probeBudget = deadline - Date.now();
+        if (probeBudget <= 0) break;
+        requestSignal = AbortSignal.timeout(Math.max(1, Math.ceil(probeBudget)));
+        const probe = await fetchFunctionResponse(functionUrlFor(root, INGEST_SLUG), {
+          method: "POST", headers, signal: requestSignal, body: JSON.stringify({ kind: "cost_capabilities" }),
+        });
+        let capabilities = {};
+        try { capabilities = JSON.parse(await probe.text()); } catch { /* unsupported legacy server */ }
+        if (!probe.ok || !Array.isArray(capabilities.cost_coverage_versions) || !capabilities.cost_coverage_versions.includes(1)) {
+          const error = new Error("Cloud cost coverage v1 unavailable; usage retained locally until the server supports it");
+          error.code = probe.status === 401 ? "CLOUD_DEVICE_TOKEN_REJECTED" : "CLOUD_COST_COVERAGE_UNSUPPORTED";
+          error.status = probe.ok ? 409 : probe.status;
+          throw error;
+        }
+        coverageSupported = true;
+      }
+      if (!canUpload()) break;
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
       requestSignal = AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs)));
@@ -4490,6 +4581,7 @@ async function drainQueueToCloud({ baseUrl, anonKey, deviceToken, queuePath, que
         signal: requestSignal,
         body: JSON.stringify({
           upload_id: uploadId,
+          ...(needsCoverage ? { cost_coverage_version: 1 } : {}),
           hourly: result.buckets,
           ...(result.sessionStates.length > 0
             ? { account_session_states: result.sessionStates }
@@ -4512,6 +4604,12 @@ async function drainQueueToCloud({ baseUrl, anonKey, deviceToken, queuePath, que
         throw err;
       }
 
+      if (needsCoverage && data.cost_coverage_version !== 1) {
+        const error = new Error("Cloud did not acknowledge cost coverage v1; queue offset retained");
+        error.code = "CLOUD_COST_COVERAGE_UNSUPPORTED";
+        error.status = 409;
+        throw error;
+      }
       cloudAccess = data;
       if (data.upload_scope === "community") batchBudget = Math.min(batchBudget, 10);
       inserted += Number(data?.inserted || 0);

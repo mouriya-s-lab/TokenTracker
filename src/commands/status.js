@@ -71,6 +71,8 @@ const {
   piAgentDirCollidesWithOmp,
   resolvePrimeAgentSessionFiles,
   resolvePrimeAgentDir,
+  resolveDeepaiCodeSessionsDir,
+  resolveDeepaiCodeSessionFiles,
   resolveCraftSessionFiles,
   resolveCraftConfigDir,
   resolveReasonixHome,
@@ -120,6 +122,11 @@ const {
   extractTraeCnToken,
 } = require("../lib/trae-cn-config");
 const wsl = require("../lib/wsl-probe");
+const {
+  T3_ANTIGRAVITY_REL,
+  discoverT3AntigravityBrainDirs,
+  formatAntigravityHostStatus,
+} = require("../lib/antigravity-discovery");
 const { getWslMode, isInvalidWslMode, shouldProbeWsl, discoverWslHome } = wsl;
 const { resolveInstallPaths, resolveZcodeNativeDbPath, resolveMimoNativeDbPath } = require("../lib/install-resolver");
 const {
@@ -546,6 +553,11 @@ async function cmdStatus(argv = []) {
   const primeAgentInstalled = Boolean(primeAgentDir) && fssync.existsSync(path.join(primeAgentDir, "sessions"));
   const primeAgentFiles = primeAgentInstalled ? resolvePrimeAgentSessionFiles(process.env) : [];
 
+  // DeepAI Code — passive scan of the pi-style sessions it embeds.
+  const deepaiCodeSessionsDir = resolveDeepaiCodeSessionsDir(process.env);
+  const deepaiCodeInstalled = Boolean(deepaiCodeSessionsDir) && fssync.existsSync(deepaiCodeSessionsDir);
+  const deepaiCodeFiles = deepaiCodeInstalled ? resolveDeepaiCodeSessionFiles(process.env) : [];
+
   // Craft Agents — passive scan only (no hooks).
   const craftConfigDir = resolveCraftConfigDir(process.env);
   const craftInstalled = Boolean(craftConfigDir && fssync.existsSync(craftConfigDir));
@@ -728,6 +740,21 @@ async function cmdStatus(argv = []) {
       antigravityActive.push(`WSL: ${geminiPaths.wsl}`);
     }
   }
+  const extraT3Parents = [];
+  if (process.platform === "win32" && shouldProbeWsl(process.env)) {
+    const wslT3Home = discoverWslHome(".t3");
+    if (wslT3Home) extraT3Parents.push(path.join(wslT3Home, T3_ANTIGRAVITY_REL));
+  }
+  const antigravityHost = await discoverT3AntigravityBrainDirs({
+    home,
+    env: process.env,
+    parents: extraT3Parents,
+  });
+  const antigravityHostLines = formatAntigravityHostStatus(antigravityHost.reports);
+  for (const line of antigravityHostLines) {
+    if (line.startsWith("T3: ")) antigravityActive.push(line);
+  }
+  const antigravityHostNotes = antigravityHostLines.filter((line) => !line.startsWith("T3: "));
   const antigravityInstalled = antigravityActive.length > 0;
 
   // Codex CLI (passive sessions scan). Mirrors the sync resolution exactly
@@ -1154,6 +1181,9 @@ async function cmdStatus(argv = []) {
         prime_agent: primeAgentInstalled
           ? { installed: true, files: primeAgentFiles.length }
           : { installed: false },
+        deepai: deepaiCodeInstalled
+          ? { installed: true, files: deepaiCodeFiles.length }
+          : { installed: false },
         craft: craftInstalled
           ? { installed: true, files: craftFiles.length }
           : { installed: false },
@@ -1359,6 +1389,9 @@ async function cmdStatus(argv = []) {
       primeAgentInstalled
         ? `- Prime Agent: passive reader (${primeAgentFiles.length} session jsonl file${primeAgentFiles.length !== 1 ? "s" : ""} found)`
         : null,
+      deepaiCodeInstalled
+        ? `- DeepAI Code: passive reader (${deepaiCodeFiles.length} session jsonl file${deepaiCodeFiles.length !== 1 ? "s" : ""} found)`
+        : null,
       craftInstalled
         ? `- Craft Agents: passive reader (${craftFiles.length} session jsonl file${craftFiles.length !== 1 ? "s" : ""} found)`
         : null,
@@ -1404,6 +1437,7 @@ async function cmdStatus(argv = []) {
       antigravityInstalled
         ? `- Antigravity: brain found (${antigravityActive.join(" | ")})`
         : null,
+      ...antigravityHostNotes.map((line) => `- Antigravity: ${line}`),
       (!geminiCliInstalled && !antigravityInstalled && geminiInstalledStatus)
         ? `- Gemini CLI / Antigravity: home found (${geminiActive.join(" | ")})`
         : null,

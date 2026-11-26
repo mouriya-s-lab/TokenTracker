@@ -234,6 +234,7 @@ function ProviderDistributionSkeleton() {
 }
 
 export function UsageOverview({
+  cloudNotice,
   period,
   periods,
   onPeriodChange,
@@ -387,7 +388,7 @@ export function UsageOverview({
   );
   const allModels = useMemo(() => buildAllModels(fleetData), [fleetData]);
   const allUsage = allModels.reduce((sum, model) => sum + (Number(model.usage) || 0), 0);
-  const allCost = providers.reduce((sum, provider) => sum + (Number(provider.usd) || 0), 0);
+  const allCost = fleetData.reduce((sum, provider) => sum + (Number(provider.usd) || 0), 0);
   const activeProvider =
     expandedProvider == null
       ? null
@@ -520,6 +521,8 @@ export function UsageOverview({
             )}
           </div>
         </div>
+
+        {cloudNotice}
 
         {/* Main Stats */}
         <div className="text-center mb-8">
@@ -857,7 +860,7 @@ function ModelSpeedTierRows({ model }) {
  * backed row with no computable cost shows the unpriced label instead of an
  * empty cell, matching the cost analysis modal's wording.
  */
-function ModelRowHeader({ model, tokensLabel, costLabel, unpricedLabel, expandable, isExpanded }) {
+function ModelRowHeader({ model, tokensLabel, costLabel, unpricedLabel, costHint, expandable, isExpanded }) {
   const { formatTokensTooltip } = useTokenFormat();
   return (
     <>
@@ -874,7 +877,7 @@ function ModelRowHeader({ model, tokensLabel, costLabel, unpricedLabel, expandab
         {tokensLabel}
       </span>
       <span
-        title={unpricedLabel ? copy("dashboard.cost_breakdown.unpriced") : undefined}
+        title={unpricedLabel ? costHint : undefined}
         className="col-start-3 row-start-1 text-right whitespace-nowrap text-sm text-oai-gray-500 dark:text-oai-gray-400 tabular-nums"
       >
         {costLabel ?? unpricedLabel}
@@ -915,14 +918,16 @@ function ModelUsageRows({ models, color }) {
     <div className="space-y-3">
       {models.map((model) => {
         const tokensLabel = modelTokensCellLabel(model, formatTokens);
-        const costLabel = formatCost(model.cost, currency, rate);
+        const costLabel = formatCost(model.cost, currency, rate) || (model.cost === 0 && ["provider_reported", "allocated"].includes(model.costSource) ? formatUsdCurrency(0, { currency, rate }) : null);
         // A blank cost cell on a token-backed row means "no published rate",
         // not "free" — spell it out instead of leaving an empty column that
         // reads as broken. Request-only rows (no tokens) keep the blank cell:
         // their missing cost means "nothing booked", not "unpriced".
+        const subscriptionUsage = model.pricing?.source === "cursor_subscription";
         const unpricedLabel = !costLabel && Number(model.usage) > 0 && isUnpricedModel(model)
-          ? copy("dashboard.cost_breakdown.unpriced_label")
+          ? copy(subscriptionUsage ? "dashboard.cost_breakdown.subscription_usage" : "dashboard.cost_breakdown.unpriced_label")
           : null;
+        const costHint = copy(subscriptionUsage ? "dashboard.cost_breakdown.subscription_usage_hint" : "dashboard.cost_breakdown.unpriced");
         const clampedShare = Math.max(0, Math.min(100, Number(model.share) || 0));
         const rowKey = model.id || model.name;
         // A row expands only when the backend supplied token-type splits;
@@ -932,7 +937,7 @@ function ModelUsageRows({ models, color }) {
         const expandable = hasModelTokenSplits(model);
         const isExpanded = expandable && expandedModel === rowKey;
         const gridClassName = MODEL_ROW_GRID;
-        const headerProps = { model, tokensLabel, costLabel, unpricedLabel, expandable, isExpanded };
+        const headerProps = { model, tokensLabel, costLabel, unpricedLabel, costHint, expandable, isExpanded };
         return (
           <div key={rowKey} data-model-rank-row>
             {expandable ? (
@@ -953,6 +958,13 @@ function ModelUsageRows({ models, color }) {
               <>
                 <ModelTokenSplits tokens={model.tokens} />
                 <ModelSpeedTierRows model={model} />
+                <p className="pb-2 text-[11px] leading-relaxed text-oai-gray-500 dark:text-oai-gray-400">
+                  {copy(model.costSource === "provider_reported" ? "usage.evidence.reported"
+                    : model.costSource === "allocated" ? "usage.evidence.allocated"
+                    : model.costSource === "mixed" ? "usage.evidence.mixed" : isUnpricedModel(model) ? "usage.evidence.unpriced" : "usage.evidence.estimated")}
+                  {model.hasAllocatedCost && model.costSource !== "allocated" ? ` ${copy("usage.evidence.allocated")}` : ""}
+                  {model.pricing?.source === "cursor_subscription" ? <> {copy("usage.evidence.subscription")}</> : null}
+                </p>
               </>
             )}
             <div
